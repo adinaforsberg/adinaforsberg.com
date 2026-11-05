@@ -1,0 +1,9 @@
+# Old Squarespace URLs -> new URLs
+/home                 /              301
+/home/                /              301
+/home/about-b2zyb     /about         301
+/home/about-b2zyb/    /about         301
+/home/listen-tdnmp    /listen        301
+/home/listen-tdnmp/   /listen        301
+/new-page             /arrangements  301
+/new-page/            /arrangements  301

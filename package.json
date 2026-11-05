@@ -1,0 +1,13 @@
+{
+  "name": "adinaforsberg",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "upload-audio": "sh scripts/upload-audio.sh --remote",
+    "upload-audio:local": "sh scripts/upload-audio.sh --local"
+  },
+  "devDependencies": {
+    "wrangler": "^4.157.0"
+  }
+}
