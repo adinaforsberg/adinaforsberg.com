@@ -1,0 +1,794 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Relief Light — experiment</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #05070a;
+    color: #e8e8ea;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+    width: 100vw;
+    padding: 14px 16px 12px;
+  }
+  a.back-link {
+    position: fixed;
+    top: 18px;
+    left: 20px;
+    color: #9a9a9f;
+    text-decoration: none;
+    font-size: 13px;
+    letter-spacing: .02em;
+    border: 1px solid #2a2a2e;
+    padding: 6px 12px;
+    border-radius: 2px;
+    transition: border-color .2s, color .2s, background .2s;
+    z-index: 20;
+    background: rgba(5,7,10,.6);
+    backdrop-filter: blur(4px);
+  }
+  a.back-link:hover {
+    color: #eee;
+    border-color: #8a8a90;
+    background: #141416;
+  }
+  .stage {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    overflow: hidden;
+    background: #060708;
+    box-shadow: 0 0 0 1px #1c1c20, 0 40px 90px -30px rgba(0,0,0,.8);
+  }
+  #gl {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    cursor: crosshair;
+  }
+  .fallback {
+    max-width: 30rem;
+    text-align: center;
+    color: #b5b5b5;
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 0 20px;
+  }
+  .bottom {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding-top: 10px;
+  }
+  .caption {
+    margin: 0;
+    font-size: 12.5px;
+    letter-spacing: .03em;
+    color: #8a8a90;
+    text-align: center;
+    user-select: none;
+  }
+  .caption strong { color: #c7c7cc; font-weight: 600; }
+  .modes {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 7px;
+  }
+  .mode-btn {
+    appearance: none;
+    background: transparent;
+    border: 1px solid #2a2a2e;
+    color: #9a9a9f;
+    font-size: 11.5px;
+    letter-spacing: .03em;
+    padding: 5px 11px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: border-color .2s, color .2s, background .2s;
+  }
+  .mode-btn:hover { color: #d2d2d6; border-color: #4a4a50; }
+  .mode-btn.active {
+    color: #0a0a0c;
+    background: #d8d8dc;
+    border-color: #d8d8dc;
+  }
+</style>
+</head>
+<body>
+  <a class="back-link" href="/experiments/">&larr; experiments</a>
+  <div class="stage">
+    <canvas id="gl"></canvas>
+  </div>
+  <div class="bottom">
+    <p class="caption" id="caption"><strong>Relief Light</strong> — move to light the carving &middot; click to flare &middot; idle to let it orbit</p>
+    <div class="modes" id="modes">
+      <button class="mode-btn active" type="button" data-mode="0">Photo</button>
+      <button class="mode-btn" type="button" data-mode="1">Plaster</button>
+      <button class="mode-btn" type="button" data-mode="2">Gold</button>
+      <button class="mode-btn" type="button" data-mode="3">Underwater</button>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  var IMAGE_PATH = "/public/images/home-about.webp";
+
+  var canvas = document.getElementById("gl");
+  var stage = document.querySelector(".stage");
+  var gl = canvas.getContext("webgl2", { antialias: true, preserveDrawingBuffer: false });
+
+  if (!gl) {
+    stage.innerHTML = '<p class="fallback">WebGL2 is not available in this browser, so the relief-light effect cannot run here.</p>';
+    return;
+  }
+
+  // -------------------------------------------------------------------
+  // Shared fullscreen-triangle-strip vertex shader
+  // -------------------------------------------------------------------
+
+  var VS_SRC = [
+    "#version 300 es",
+    "in vec2 aPos;",
+    "out vec2 vUv;",
+    "void main() {",
+    "  vUv = vec2((aPos.x + 1.0) * 0.5, 1.0 - (aPos.y + 1.0) * 0.5);",
+    "  gl_Position = vec4(aPos, 0.0, 1.0);",
+    "}"
+  ].join("\n");
+
+  var LUM_FS = [
+    "#version 300 es",
+    "precision highp float;",
+    "in vec2 vUv;",
+    "out vec4 outColor;",
+    "uniform sampler2D uPhoto;",
+    "void main() {",
+    "  vec3 c = texture(uPhoto, vUv).rgb;",
+    "  float lum = dot(c, vec3(0.299, 0.587, 0.114));",
+    "  outColor = vec4(lum, 0.0, 0.0, 1.0);",
+    "}"
+  ].join("\n");
+
+  var BLUR_FS = [
+    "#version 300 es",
+    "precision highp float;",
+    "in vec2 vUv;",
+    "out vec4 outColor;",
+    "uniform sampler2D uTex;",
+    "uniform vec2 uTexel;",
+    "uniform vec2 uDir;",
+    "uniform float uRadius;",
+    "void main() {",
+    "  vec2 st = uDir * uTexel * uRadius;",
+    "  float w0 = 0.227027;",
+    "  float w1 = 0.1945946;",
+    "  float w2 = 0.1216216;",
+    "  float w3 = 0.054054;",
+    "  float w4 = 0.016216;",
+    "  float sum = texture(uTex, vUv).r * w0;",
+    "  sum += texture(uTex, vUv + st * 1.0).r * w1;",
+    "  sum += texture(uTex, vUv - st * 1.0).r * w1;",
+    "  sum += texture(uTex, vUv + st * 2.0).r * w2;",
+    "  sum += texture(uTex, vUv - st * 2.0).r * w2;",
+    "  sum += texture(uTex, vUv + st * 3.0).r * w3;",
+    "  sum += texture(uTex, vUv - st * 3.0).r * w3;",
+    "  sum += texture(uTex, vUv + st * 4.0).r * w4;",
+    "  sum += texture(uTex, vUv - st * 4.0).r * w4;",
+    "  outColor = vec4(sum, 0.0, 0.0, 1.0);",
+    "}"
+  ].join("\n");
+
+  var NORMAL_FS = [
+    "#version 300 es",
+    "precision highp float;",
+    "in vec2 vUv;",
+    "out vec4 outColor;",
+    "uniform sampler2D uHeight;",
+    "uniform vec2 uTexel;",
+    "uniform float uStrength;",
+    "void main() {",
+    "  vec2 t = uTexel;",
+    "  float tl = texture(uHeight, vUv + vec2(-t.x, -t.y)).r;",
+    "  float tc = texture(uHeight, vUv + vec2(0.0, -t.y)).r;",
+    "  float tr = texture(uHeight, vUv + vec2(t.x, -t.y)).r;",
+    "  float ml = texture(uHeight, vUv + vec2(-t.x, 0.0)).r;",
+    "  float mr = texture(uHeight, vUv + vec2(t.x, 0.0)).r;",
+    "  float bl = texture(uHeight, vUv + vec2(-t.x, t.y)).r;",
+    "  float bc = texture(uHeight, vUv + vec2(0.0, t.y)).r;",
+    "  float br = texture(uHeight, vUv + vec2(t.x, t.y)).r;",
+    "  float gx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);",
+    "  float gy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);",
+    "  vec3 n = normalize(vec3(-gx * uStrength, -gy * uStrength, 1.0));",
+    "  outColor = vec4(n * 0.5 + 0.5, 1.0);",
+    "}"
+  ].join("\n");
+
+  var FINAL_FS = [
+    "#version 300 es",
+    "precision highp float;",
+    "in vec2 vUv;",
+    "out vec4 outColor;",
+    "",
+    "uniform sampler2D uPhoto;",
+    "uniform sampler2D uNormalFine;",
+    "uniform sampler2D uNormalBroad;",
+    "uniform sampler2D uHeightFine;",
+    "uniform sampler2D uHeightBroad;",
+    "uniform vec2 uCoverScale;",
+    "uniform vec2 uCoverOffset;",
+    "uniform vec2 uLightUV;",
+    "uniform float uLightHeight;",
+    "uniform float uTime;",
+    "uniform float uMode;",
+    "uniform float uFlare;",
+    "",
+    "const float HEIGHT_SCALE = 0.22;",
+    "",
+    "float sampleHeight(vec2 uv) {",
+    "  float hf = texture(uHeightFine, uv).r;",
+    "  float hb = texture(uHeightBroad, uv).r;",
+    "  return mix(hb, hf, 0.45);",
+    "}",
+    "",
+    "vec2 causticRotate(vec2 v, float a) {",
+    "  float s = sin(a);",
+    "  float c = cos(a);",
+    "  return vec2(c * v.x - s * v.y, s * v.x + c * v.y);",
+    "}",
+    "",
+    "float causticField(vec2 uv, vec2 bendXY, float t) {",
+    "  vec2 p = uv * 4.3 + bendXY * 1.3;",
+    "  vec2 w = p + 0.4 * vec2(sin(p.y * 1.3 + t * 0.35), cos(p.x * 1.1 - t * 0.3));",
+    "  w += 0.18 * vec2(sin(p.x * 2.7 - t * 0.5 + p.y), cos(p.y * 2.3 + t * 0.4 - p.x));",
+    "",
+    "  vec2 p1 = causticRotate(w, 0.35) + vec2(t * 0.14, -t * 0.10);",
+    "  float r1 = pow(1.0 - abs(sin(p1.x * 2.6 + p1.y * 1.1)), 7.5);",
+    "",
+    "  vec2 p2 = causticRotate(w, -0.95) + vec2(-t * 0.11, t * 0.17);",
+    "  float r2 = pow(1.0 - abs(sin(p2.x * 1.4 - p2.y * 2.8)), 7.5);",
+    "",
+    "  vec2 p3 = causticRotate(w, 1.5) + vec2(t * 0.09, t * 0.13);",
+    "  float r3 = pow(1.0 - abs(sin(p3.x * 2.1 + p3.y * 2.1)), 7.5);",
+    "",
+    "  return clamp(max(max(r1, r2), r3), 0.0, 1.0);",
+    "}",
+    "",
+    "void main() {",
+    "  vec2 uv = vUv * uCoverScale + uCoverOffset;",
+    "",
+    "  vec3 nFine = normalize(texture(uNormalFine, uv).xyz * 2.0 - 1.0);",
+    "  vec3 nBroad = normalize(texture(uNormalBroad, uv).xyz * 2.0 - 1.0);",
+    "  float fineWeight = uMode > 2.5 ? 0.72 : 0.58;",
+    "  vec3 normal = normalize(mix(nBroad, nFine, fineWeight));",
+    "",
+    "  if (uMode > 2.5) {",
+    "    float w1 = sin(uv.x * 18.0 + uTime * 0.6) * cos(uv.y * 14.0 - uTime * 0.5);",
+    "    float w2 = sin(uv.y * 22.0 - uTime * 0.8 + uv.x * 6.0);",
+    "    normal.xy += vec2(w1, w2) * 0.05;",
+    "    normal = normalize(normal);",
+    "  }",
+    "",
+    "  float h = sampleHeight(uv) * HEIGHT_SCALE;",
+    "  vec3 pos3 = vec3(uv, h);",
+    "  vec3 lightPos3 = vec3(uLightUV, uLightHeight);",
+    "  vec3 toLight = lightPos3 - pos3;",
+    "  float dist = length(toLight);",
+    "  vec3 L = toLight / max(dist, 1e-4);",
+    "  vec3 V = vec3(0.0, 0.0, 1.0);",
+    "  vec3 Hh = normalize(L + V);",
+    "",
+    "  float diff = max(dot(normal, L), 0.0);",
+    "  float shin = uMode < 0.5 ? 22.0 : (uMode < 1.5 ? 14.0 : (uMode < 2.5 ? 50.0 : 60.0));",
+    "  float spec = pow(max(dot(normal, Hh), 0.0), shin);",
+    "  float atten = 1.0 / (1.0 + 2.2 * dist * dist);",
+    "",
+    "  float shadow = 1.0;",
+    "  float rayLen = dist;",
+    "  const int STEPS = 6;",
+    "  for (int i = 1; i <= STEPS; i++) {",
+    "    float t = rayLen * (float(i) / float(STEPS));",
+    "    vec3 sp = pos3 + L * t;",
+    "    float sh = sampleHeight(sp.xy) * HEIGHT_SCALE;",
+    "    float blocked = sh - sp.z;",
+    "    shadow *= 1.0 - clamp(blocked * 9.0, 0.0, 1.0);",
+    "  }",
+    "  shadow = clamp(shadow, 0.22, 1.0);",
+    "",
+    "  vec3 baseColor;",
+    "  vec3 specColor;",
+    "  float ambient;",
+    "",
+    "  if (uMode < 0.5) {",
+    "    vec3 photo = texture(uPhoto, uv).rgb;",
+    "    baseColor = photo;",
+    "    specColor = vec3(1.0);",
+    "    ambient = 0.22;",
+    "  } else if (uMode < 1.5) {",
+    "    baseColor = vec3(0.85, 0.82, 0.77);",
+    "    specColor = vec3(1.0, 0.98, 0.95);",
+    "    ambient = 0.09;",
+    "  } else if (uMode < 2.5) {",
+    "    baseColor = vec3(0.40, 0.27, 0.08);",
+    "    specColor = vec3(1.0, 0.80, 0.42);",
+    "    ambient = 0.05;",
+    "  } else {",
+    "    baseColor = mix(vec3(0.015, 0.05, 0.08), vec3(0.05, 0.22, 0.28), diff);",
+    "    specColor = vec3(0.55, 0.85, 0.95);",
+    "    ambient = 0.04;",
+    "  }",
+    "",
+    "  vec3 color = baseColor * (ambient + diff * shadow * atten * 1.7)",
+    "    + specColor * spec * shadow * atten * (uMode < 0.5 ? 1.3 : 2.1);",
+    "",
+    "  color += specColor * uFlare * (0.5 + spec * 2.2) * atten;",
+    "",
+    "  if (uMode > 2.5) {",
+    "    float caustic = causticField(uv, normal.xy * 0.85, uTime * 0.5);",
+    "    vec3 causticColor = vec3(0.45, 0.95, 1.0);",
+    "    float causticAmt = caustic * (0.2 + 0.7 * diff) * (0.45 + 0.55 * shadow);",
+    "    color += causticColor * causticAmt * 0.9;",
+    "  }",
+    "",
+    "  if (uMode > 1.5 && uMode < 2.5) {",
+    "    float rim = pow(1.0 - max(dot(normal, V), 0.0), 3.0);",
+    "    color += specColor * rim * 0.35;",
+    "  }",
+    "",
+    "  color = pow(clamp(color, 0.0, 1.0), vec3(0.92));",
+    "  outColor = vec4(color, 1.0);",
+    "}"
+  ].join("\n");
+
+  // -------------------------------------------------------------------
+  // GL helpers
+  // -------------------------------------------------------------------
+
+  function compileShader(type, src) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      var log = gl.getShaderInfoLog(sh);
+      gl.deleteShader(sh);
+      throw new Error("Shader compile error: " + log);
+    }
+    return sh;
+  }
+
+  function linkProgram(vsSrc, fsSrc) {
+    var vs = compileShader(gl.VERTEX_SHADER, vsSrc);
+    var fs = compileShader(gl.FRAGMENT_SHADER, fsSrc);
+    var prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      throw new Error("Program link error: " + gl.getProgramInfoLog(prog));
+    }
+    return prog;
+  }
+
+  function uniforms(prog, names) {
+    var u = {};
+    names.forEach(function (n) { u[n] = gl.getUniformLocation(prog, n); });
+    return u;
+  }
+
+  var quadVerts = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
+  var quadVBO = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadVBO);
+  gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+
+  function makeVAO(prog) {
+    var vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadVBO);
+    var loc = gl.getAttribLocation(prog, "aPos");
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    return vao;
+  }
+
+  function drawQuad(vao) {
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  // height/luminance render-target format: try a float extension for
+  // smoother broad gradients, fall back to R8 (always renderable in core WebGL2)
+  var floatExt = gl.getExtension("EXT_color_buffer_float");
+  var HEIGHT_FMT = floatExt
+    ? { internal: gl.R16F, type: gl.FLOAT, filter: gl.LINEAR }
+    : { internal: gl.R8, type: gl.UNSIGNED_BYTE, filter: gl.LINEAR };
+
+  function createRT(w, h, internal, format, type, filter) {
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    var fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    var status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      console.error("Framebuffer incomplete:", status);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { tex: tex, fbo: fbo, w: w, h: h };
+  }
+
+  // -------------------------------------------------------------------
+  // Programs
+  // -------------------------------------------------------------------
+
+  var lumProg = linkProgram(VS_SRC, LUM_FS);
+  var lumVAO = makeVAO(lumProg);
+  var lumU = uniforms(lumProg, ["uPhoto"]);
+
+  var blurProg = linkProgram(VS_SRC, BLUR_FS);
+  var blurVAO = makeVAO(blurProg);
+  var blurU = uniforms(blurProg, ["uTex", "uTexel", "uDir", "uRadius"]);
+
+  var normalProg = linkProgram(VS_SRC, NORMAL_FS);
+  var normalVAO = makeVAO(normalProg);
+  var normalU = uniforms(normalProg, ["uHeight", "uTexel", "uStrength"]);
+
+  var finalProg = linkProgram(VS_SRC, FINAL_FS);
+  var finalVAO = makeVAO(finalProg);
+  var finalU = uniforms(finalProg, [
+    "uPhoto", "uNormalFine", "uNormalBroad", "uHeightFine", "uHeightBroad",
+    "uCoverScale", "uCoverOffset", "uLightUV", "uLightHeight", "uTime", "uMode", "uFlare"
+  ]);
+
+  // -------------------------------------------------------------------
+  // One-time preprocessing: photo -> luminance -> fine/broad height -> normals
+  // -------------------------------------------------------------------
+
+  var photoTex = null;
+  var textures = null; // { normalFine, normalBroad, heightFine, heightBroad }
+  var imgW = 1, imgH = 1;
+  var ready = false;
+
+  function blurPass(srcTex, w, h, dirX, dirY, radius, destRT) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, destRT.fbo);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(blurProg);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, srcTex);
+    gl.uniform1i(blurU.uTex, 0);
+    gl.uniform2f(blurU.uTexel, 1 / w, 1 / h);
+    gl.uniform2f(blurU.uDir, dirX, dirY);
+    gl.uniform1f(blurU.uRadius, radius);
+    drawQuad(blurVAO);
+  }
+
+  function gaussian2D(srcTex, w, h, radius, scratchRT, destRT) {
+    blurPass(srcTex, w, h, 1, 0, radius, scratchRT);
+    blurPass(scratchRT.tex, w, h, 0, 1, radius, destRT);
+  }
+
+  function normalPass(heightTex, w, h, strength, destRT) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, destRT.fbo);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(normalProg);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, heightTex);
+    gl.uniform1i(normalU.uHeight, 0);
+    gl.uniform2f(normalU.uTexel, 1 / w, 1 / h);
+    gl.uniform1f(normalU.uStrength, strength);
+    drawQuad(normalVAO);
+  }
+
+  function buildRelief(img) {
+    imgW = img.naturalWidth;
+    imgH = img.naturalHeight;
+    var w = imgW, h = imgH;
+
+    photoTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, photoTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+
+    var lumRT = createRT(w, h, HEIGHT_FMT.internal, gl.RED, HEIGHT_FMT.type, HEIGHT_FMT.filter);
+    var scratchRT = createRT(w, h, HEIGHT_FMT.internal, gl.RED, HEIGHT_FMT.type, HEIGHT_FMT.filter);
+    var fineRT = createRT(w, h, HEIGHT_FMT.internal, gl.RED, HEIGHT_FMT.type, HEIGHT_FMT.filter);
+    var broadRT1 = createRT(w, h, HEIGHT_FMT.internal, gl.RED, HEIGHT_FMT.type, HEIGHT_FMT.filter);
+    var broadRT2 = createRT(w, h, HEIGHT_FMT.internal, gl.RED, HEIGHT_FMT.type, HEIGHT_FMT.filter);
+    var normalFineRT = createRT(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
+    var normalBroadRT = createRT(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
+
+    // luminance
+    gl.bindFramebuffer(gl.FRAMEBUFFER, lumRT.fbo);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(lumProg);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, photoTex);
+    gl.uniform1i(lumU.uPhoto, 0);
+    drawQuad(lumVAO);
+
+    // fine height: one light blur to tame sensor/compression noise, keep detail
+    gaussian2D(lumRT.tex, w, h, 1.4, scratchRT, fineRT);
+
+    // broad height: chain of growing-radius blurs starting from the fine map
+    var radii = [2.5, 5, 9, 15, 24];
+    var current = fineRT.tex;
+    var targets = [broadRT1, broadRT2];
+    var lastRT = fineRT;
+    for (var i = 0; i < radii.length; i++) {
+      var dest = targets[i % 2];
+      gaussian2D(current, w, h, radii[i], scratchRT, dest);
+      current = dest.tex;
+      lastRT = dest;
+    }
+    var broadTexFinal = current;
+
+    // normals from each height scale
+    normalPass(fineRT.tex, w, h, 6.0, normalFineRT);
+    normalPass(broadTexFinal, w, h, 11.0, normalBroadRT);
+
+    textures = {
+      normalFine: normalFineRT.tex,
+      normalBroad: normalBroadRT.tex,
+      heightFine: fineRT.tex,
+      heightBroad: broadTexFinal
+    };
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    ready = true;
+  }
+
+  var img = new Image();
+  img.onload = function () {
+    try {
+      buildRelief(img);
+      resize();
+    } catch (err) {
+      console.error(err);
+      stage.innerHTML = '<p class="fallback">Something went wrong building the relief (' + (err && err.message ? err.message : err) + ').</p>';
+    }
+  };
+  img.onerror = function (e) {
+    console.error("Failed to load portrait", e);
+    stage.innerHTML = '<p class="fallback">Could not load the portrait image.</p>';
+  };
+  img.src = IMAGE_PATH;
+
+  // -------------------------------------------------------------------
+  // Cover-fit mapping (canvas space -> image uv space)
+  // -------------------------------------------------------------------
+
+  var coverScale = [1, 1];
+  var coverOffset = [0, 0];
+
+  function computeCover(canvasW, canvasH, w, h) {
+    var s = Math.max(canvasW / w, canvasH / h);
+    var sx = canvasW / (w * s);
+    var sy = canvasH / (h * s);
+    return { scale: [sx, sy], offset: [0.5 * (1 - sx), 0.5 * (1 - sy)] };
+  }
+
+  function updateCover() {
+    if (!ready) return;
+    var c = computeCover(canvas.width, canvas.height, imgW, imgH);
+    coverScale = c.scale;
+    coverOffset = c.offset;
+  }
+
+  // -------------------------------------------------------------------
+  // Resize
+  // -------------------------------------------------------------------
+
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var rect = stage.getBoundingClientRect();
+    var w = Math.max(1, Math.round(rect.width * dpr));
+    var h = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    updateCover();
+  }
+
+  var ro = new ResizeObserver(resize);
+  ro.observe(stage);
+  resize();
+
+  // -------------------------------------------------------------------
+  // Pointer / light interaction
+  // -------------------------------------------------------------------
+
+  var lightUV = { x: 0.5, y: 0.42 };
+  var targetUV = { x: 0.5, y: 0.42 };
+  var lastInputTime = performance.now();
+  var wasIdle = false;
+  var orbitAngle = 0;
+  var flareStart = -1e6;
+  var mode = 0;
+
+  var IDLE_MS = 3000;
+  var ORBIT_CX = 0.5, ORBIT_CY = 0.44, ORBIT_RX = 0.32, ORBIT_RY = 0.27;
+
+  function clamp01(v) { return Math.min(1, Math.max(0, v)); }
+
+  function clientToImageUV(clientX, clientY) {
+    var rect = canvas.getBoundingClientRect();
+    var sx = clamp01((clientX - rect.left) / rect.width);
+    var sy = clamp01((clientY - rect.top) / rect.height);
+    var ux = sx * coverScale[0] + coverOffset[0];
+    var uy = sy * coverScale[1] + coverOffset[1];
+    return { x: clamp01(ux), y: clamp01(uy) };
+  }
+
+  canvas.addEventListener("pointermove", function (e) {
+    var p = clientToImageUV(e.clientX, e.clientY);
+    targetUV.x = p.x;
+    targetUV.y = p.y;
+    lastInputTime = performance.now();
+  });
+  canvas.addEventListener("pointerdown", function (e) {
+    var p = clientToImageUV(e.clientX, e.clientY);
+    targetUV.x = p.x;
+    targetUV.y = p.y;
+    lastInputTime = performance.now();
+    flareStart = performance.now();
+  });
+  canvas.addEventListener("pointercancel", function () {});
+
+  window.addEventListener("keydown", function (e) {
+    if (e.key >= "1" && e.key <= "4") {
+      setMode(parseInt(e.key, 10) - 1);
+    }
+  });
+
+  var modesEl = document.getElementById("modes");
+  modesEl.addEventListener("click", function (e) {
+    var btn = e.target.closest(".mode-btn");
+    if (!btn) return;
+    setMode(parseInt(btn.getAttribute("data-mode"), 10));
+  });
+
+  function setMode(m) {
+    mode = m;
+    var btns = modesEl.querySelectorAll(".mode-btn");
+    btns.forEach(function (b) {
+      b.classList.toggle("active", parseInt(b.getAttribute("data-mode"), 10) === m);
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Render loop
+  // -------------------------------------------------------------------
+
+  var lastFrameTime = null;
+  var accumTime = 0;
+  var rafId = null;
+
+  function frame(now) {
+    var dt = lastFrameTime === null ? 0.016 : Math.min(0.05, (now - lastFrameTime) / 1000);
+    lastFrameTime = now;
+    accumTime += dt;
+
+    var idleFor = now - lastInputTime;
+    var isIdleNow = idleFor > IDLE_MS;
+    if (isIdleNow && !wasIdle) {
+      orbitAngle = Math.atan2((lightUV.y - ORBIT_CY) / ORBIT_RY, (lightUV.x - ORBIT_CX) / ORBIT_RX);
+    }
+    wasIdle = isIdleNow;
+    if (isIdleNow) {
+      orbitAngle += dt * 0.22;
+      targetUV.x = ORBIT_CX + Math.cos(orbitAngle) * ORBIT_RX;
+      targetUV.y = ORBIT_CY + Math.sin(orbitAngle) * ORBIT_RY;
+    }
+
+    var followSpeed = isIdleNow ? 1.6 : 7.0;
+    lightUV.x += (targetUV.x - lightUV.x) * Math.min(1, dt * followSpeed);
+    lightUV.y += (targetUV.y - lightUV.y) * Math.min(1, dt * followSpeed);
+
+    var flare = Math.exp(-(now - flareStart) / 220);
+    if (now - flareStart > 2000) flare = 0;
+
+    if (ready) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(finalProg);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, photoTex);
+      gl.uniform1i(finalU.uPhoto, 0);
+
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, textures.normalFine);
+      gl.uniform1i(finalU.uNormalFine, 1);
+
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, textures.normalBroad);
+      gl.uniform1i(finalU.uNormalBroad, 2);
+
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, textures.heightFine);
+      gl.uniform1i(finalU.uHeightFine, 3);
+
+      gl.activeTexture(gl.TEXTURE4);
+      gl.bindTexture(gl.TEXTURE_2D, textures.heightBroad);
+      gl.uniform1i(finalU.uHeightBroad, 4);
+
+      gl.uniform2f(finalU.uCoverScale, coverScale[0], coverScale[1]);
+      gl.uniform2f(finalU.uCoverOffset, coverOffset[0], coverOffset[1]);
+      gl.uniform2f(finalU.uLightUV, lightUV.x, lightUV.y);
+      gl.uniform1f(finalU.uLightHeight, 0.30 + flare * 0.06);
+      gl.uniform1f(finalU.uTime, accumTime);
+      gl.uniform1f(finalU.uMode, mode);
+      gl.uniform1f(finalU.uFlare, flare);
+
+      drawQuad(finalVAO);
+    }
+
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function start() {
+    if (rafId === null) {
+      lastFrameTime = null;
+      rafId = requestAnimationFrame(frame);
+    }
+  }
+  function stop() {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) stop(); else start();
+  });
+
+  start();
+})();
+</script>
+<script id="adina-context-guard">
+// Browsers cap the number of live WebGL contexts (~16) and drop the oldest when more tabs open one.
+// If that happens to this page, reload it the next time the tab is shown.
+(() => {
+  let lost = false;
+  document.addEventListener('webglcontextlost', (e) => { e.preventDefault(); lost = true; }, true);
+  const reloadIfLost = () => { if (lost && document.visibilityState === 'visible') location.reload(); };
+  document.addEventListener('visibilitychange', reloadIfLost);
+  window.addEventListener('focus', reloadIfLost);
+})();
+</script>
+</body>
+</html>

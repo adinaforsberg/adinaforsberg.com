@@ -1,0 +1,1368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Drum skin — music-reactive sand portrait</title>
+<meta name="robots" content="noindex">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #05070a;
+    color: #e8e8ea;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    overflow: hidden;
+  }
+  .back-link {
+    position: fixed;
+    top: 18px;
+    left: 20px;
+    font-size: 13px;
+    letter-spacing: .02em;
+    color: #8a8a90;
+    text-decoration: none;
+    z-index: 30;
+  }
+  .back-link:hover { color: #e8e8ea; }
+
+  #gl {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    cursor: pointer;
+    background: #05070a;
+  }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: rgba(5,5,8,0.5);
+    backdrop-filter: blur(2px);
+    cursor: pointer;
+    transition: opacity .5s ease;
+    z-index: 15;
+    text-align: center;
+    padding: 20px;
+  }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  .play-ring {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: 1px solid rgba(232,232,234,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .play-ring svg { width: 18px; height: 18px; fill: #e8e8ea; margin-left: 3px; }
+  .overlay .label { font-size: 13.5px; letter-spacing: .03em; color: #e8e8ea; }
+  .overlay .sub { font-size: 12px; color: #9a9a9f; max-width: 24em; }
+
+  .msg {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 25;
+  }
+  .msg.show { display: flex; }
+  .msg-inner {
+    max-width: 460px;
+    margin: 0 20px;
+    text-align: center;
+    color: rgba(235,238,245,.85);
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  .msg-inner b { color: #fff; }
+
+  .bottom {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 7px;
+    padding: 30px 12px 12px;
+    background: linear-gradient(to top, rgba(5,7,10,0.92) 0%, rgba(5,7,10,0.55) 55%, rgba(5,7,10,0) 100%);
+    pointer-events: none;
+  }
+  .bottom * { pointer-events: auto; }
+  .caption { text-align: center; max-width: min(92vw, 640px); }
+  .caption p { margin: 0; font-size: 12px; line-height: 1.4; color: #9a9a9f; }
+  .caption p strong { color: #e8e8ea; font-weight: 600; }
+
+  .tracks { display: flex; flex-wrap: wrap; justify-content: center; gap: 5px; max-width: min(94vw, 680px); }
+  .track-btn {
+    appearance: none;
+    background: transparent;
+    border: 1px solid #2a2a2e;
+    color: #9a9a9f;
+    font-size: 10.5px;
+    letter-spacing: .03em;
+    padding: 4px 10px;
+    border-radius: 100px;
+    cursor: pointer;
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  .track-btn:hover { color: #e8e8ea; border-color: #4a4a50; }
+  .track-btn.active { color: #05070a; background: #e8e8ea; border-color: #e8e8ea; }
+
+  .status {
+    position: fixed;
+    top: 18px;
+    right: 20px;
+    font-size: 10.5px;
+    color: #4a4a50;
+    letter-spacing: .02em;
+    z-index: 30;
+  }
+</style>
+</head>
+<body>
+
+  <a class="back-link" href="/experiments/">&larr; experiments</a>
+
+  <canvas id="gl"></canvas>
+
+  <div class="overlay" id="overlay">
+    <div class="play-ring"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
+    <div class="label">click to play</div>
+    <div class="sub">the skin is still &mdash; her portrait rests in sand. music wakes the drum.</div>
+  </div>
+  <div class="msg" id="msg"><div class="msg-inner" id="msgInner"></div></div>
+
+  <div class="bottom">
+    <div class="caption">
+      <p><strong>Drum skin:</strong> her portrait in sand, bounced by the music.</p>
+    </div>
+    <div class="tracks" id="tracks"></div>
+  </div>
+
+  <div class="status" id="status">idle</div>
+
+<script type="module">
+"use strict";
+
+// ---------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------
+const GRID = 500;                       // GRID x GRID sampled, masked to a circle (~196k grains)
+let PARTICLE_COUNT = GRID * GRID;       // reassigned to the actual in-circle count after sampling
+const DRUM_R = 1.0;                      // membrane radius, world units
+const GRAIN_R = 0.97;                    // grains placed within this fraction of DRUM_R
+const IMAGE_CANDIDATES = ["/public/images/home-about.webp", "/images/home-about.webp"];
+const AUDIO_BASES = ["/audio/", "/public/audio/"];
+const TRACKS = [
+  { file: "droplet",        label: "Droplet" },
+  { file: "arvegods",       label: "Arvegods" },
+  { file: "tystnadens-ro",  label: "Tystnadens ro" },
+  { file: "canis-major",    label: "Canis Major" },
+  { file: "scyphozoa",      label: "Scyphozoa" },
+  { file: "maxima-minima",  label: "Maxima Minima" },
+  { file: "kalis-daughters",label: "Kali's Daughters" },
+  { file: "zwampen",        label: "Zwampen" },
+];
+
+// Circular membrane modes (m, zero-of-J_m used as k*R). Low bands drive low
+// (simple) modes, higher bands drive higher, more intricate ones.
+const ZEROS = {
+  // [m]: [first zero, second zero, ...]
+  0: [2.405, 5.520, 8.654],
+  1: [3.832, 7.016, 10.173],
+  2: [5.136, 8.417],
+  3: [6.380, 9.761],
+};
+const MODE_DEFS = [
+  { m: 0, k: ZEROS[0][0] }, // (0,1)
+  { m: 1, k: ZEROS[1][0] }, // (1,1)
+  { m: 2, k: ZEROS[2][0] }, // (2,1)
+  { m: 0, k: ZEROS[0][1] }, // (0,2)
+  { m: 3, k: ZEROS[3][0] }, // (3,1)
+  { m: 1, k: ZEROS[1][1] }, // (1,2)
+];
+const NUM_MODES = MODE_DEFS.length;
+const K0 = MODE_DEFS[0].k;
+const OMEGA_BASE = 1.7, OMEGA_SLOPE = 0.5;
+for (const md of MODE_DEFS) md.omega = OMEGA_BASE + OMEGA_SLOPE * (md.k - K0);
+const STRIKE_WEIGHT = [1.0, 0.85, 0.55, 0.45, 0.35, 0.3];
+// Per-mode displacement weight: low (simple) modes get noticeably larger
+// physical displacement than the higher, more intricate ones, so the drum
+// reads as "breathing" at low frequency with finer ripples layered on top.
+const DISP_WEIGHT = [2.2, 1.7, 1.15, 1.3, 0.85, 0.65];
+const BAND_EDGES = [40, 110, 260, 550, 1100, 2400, 5200]; // NUM_MODES+1 edges
+
+const LUT_SIZE = 512;
+const LUT_XMAX = 8.0;
+
+// Grain physics tuning (also uploaded to the sim-params uniform, so they can
+// be tweaked here without touching the shader).
+const PHYS = {
+  gravity: -0.85,
+  launchThresh: 0.090,
+  couple: 0.85,
+  maxLaunchVel: 0.20,
+  kickRandom: 0.06,
+  kickSlope: 0.10,
+  springQuiet: 9.0,
+  springLoud: 2.6,
+  dampingGround: 6.0,
+  airDrag: 0.55,
+  rMaxGrain: 0.985,
+};
+
+// ---------------------------------------------------------------------
+// DOM / status helpers
+// ---------------------------------------------------------------------
+const statusEl = document.getElementById("status");
+function setStatus(s) { statusEl.textContent = s; }
+
+const canvas = document.getElementById("gl");
+const overlay = document.getElementById("overlay");
+const msgEl = document.getElementById("msg");
+const msgInner = document.getElementById("msgInner");
+
+function showMessage(html) {
+  canvas.style.display = "none";
+  overlay.style.display = "none";
+  msgInner.innerHTML = html;
+  msgEl.classList.add("show");
+  setStatus("unavailable");
+}
+
+let gpuLost = false;
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && gpuLost) location.reload();
+});
+
+// ---------------------------------------------------------------------
+// tiny mat4 / vec3 helpers (column-major, WebGPU clip space: z in [0,1])
+// ---------------------------------------------------------------------
+function mat4Multiply(a, b) {
+  const out = new Float32Array(16);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += a[k * 4 + r] * b[c * 4 + k];
+      out[c * 4 + r] = sum;
+    }
+  }
+  return out;
+}
+function mat4PerspectiveWebGPU(fovyRad, aspect, near, far) {
+  const f = 1.0 / Math.tan(fovyRad / 2);
+  const out = new Float32Array(16);
+  out[0] = f / aspect;
+  out[5] = f;
+  out[10] = far / (near - far);
+  out[11] = -1;
+  out[14] = (far * near) / (near - far);
+  return out;
+}
+function vSub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+function vCross(a, b) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function vNorm(a) { const l = Math.hypot(a[0],a[1],a[2]) || 1; return [a[0]/l,a[1]/l,a[2]/l]; }
+function mat4LookAt(eye, center, up) {
+  const z = vNorm(vSub(eye, center));
+  const x = vNorm(vCross(up, z));
+  const y = vCross(z, x);
+  const out = new Float32Array(16);
+  out[0]=x[0]; out[1]=y[0]; out[2]=z[0]; out[3]=0;
+  out[4]=x[1]; out[5]=y[1]; out[6]=z[1]; out[7]=0;
+  out[8]=x[2]; out[9]=y[2]; out[10]=z[2]; out[11]=0;
+  out[12]=-(x[0]*eye[0]+x[1]*eye[1]+x[2]*eye[2]);
+  out[13]=-(y[0]*eye[0]+y[1]*eye[1]+y[2]*eye[2]);
+  out[14]=-(z[0]*eye[0]+z[1]*eye[1]+z[2]*eye[2]);
+  out[15]=1;
+  return { m: out, right: x, up: y };
+}
+
+// ---------------------------------------------------------------------
+// Bessel functions (Numerical-Recipes-style rational approximations) used
+// only once, on the CPU, to bake a 1D lookup texture of J0..J3 mode shapes.
+// ---------------------------------------------------------------------
+function bessj0(x) {
+  const ax = Math.abs(x);
+  if (ax < 8.0) {
+    const y = x * x;
+    const ans1 = 57568490574.0+y*(-13362590354.0+y*(651619640.7+y*(-11214424.18+y*(77392.33017+y*(-184.9052456)))));
+    const ans2 = 57568490411.0+y*(1029532985.0+y*(9494680.718+y*(59272.64853+y*(267.8532712+y*1.0))));
+    return ans1 / ans2;
+  }
+  const z = 8.0 / ax, y = z * z, xx = ax - 0.785398164;
+  const ans1 = 1.0+y*(-0.1098628e-2+y*(0.2734510e-4+y*(-0.2073370e-5+y*0.2093887e-6)));
+  const ans2 = -0.1562499e-1+y*(0.1430488e-3+y*(-0.6911147e-5+y*(0.7621095e-6+y*(-0.934935152e-7))));
+  return Math.sqrt(0.636619772/ax)*(Math.cos(xx)*ans1 - z*Math.sin(xx)*ans2);
+}
+function bessj1(x) {
+  const ax = Math.abs(x);
+  let ans;
+  if (ax < 8.0) {
+    const y = x * x;
+    const ans1 = x*(72362614232.0+y*(-7895059235.0+y*(242396853.1+y*(-2972611.439+y*(15704.48260+y*(-30.16036606))))));
+    const ans2 = 144725228442.0+y*(2300535178.0+y*(18583304.74+y*(99447.43394+y*(376.9991397+y*1.0))));
+    ans = ans1 / ans2;
+  } else {
+    const z = 8.0/ax, y = z*z, xx = ax - 2.356194491;
+    const ans1 = 1.0+y*(0.183105e-2+y*(-0.3516396496e-4+y*(0.2457520174e-5+y*(-0.240337019e-6))));
+    const ans2 = 0.04687499995+y*(-0.2002690873e-3+y*(0.8449199096e-5+y*(-0.88228987e-6+y*0.105787412e-6)));
+    ans = Math.sqrt(0.636619772/ax)*(Math.cos(xx)*ans1 - z*Math.sin(xx)*ans2);
+    if (x < 0.0) ans = -ans;
+  }
+  return ans;
+}
+function bessjn(n, x) {
+  if (n === 0) return bessj0(x);
+  if (n === 1) return bessj1(x);
+  if (x === 0) return 0;
+  const tox = 2.0 / x;
+  let bjm = bessj0(x), bj = bessj1(x), bjp = 0;
+  for (let j = 1; j < n; j++) { bjp = j*tox*bj - bjm; bjm = bj; bj = bjp; }
+  return bj;
+}
+function buildBesselLUT() {
+  const data = new Float32Array(LUT_SIZE * 4);
+  const step = LUT_XMAX / (LUT_SIZE - 1);
+  for (let i = 0; i < LUT_SIZE; i++) {
+    const x = i * step;
+    data[i*4+0] = bessj0(x);
+    data[i*4+1] = bessj1(x);
+    data[i*4+2] = bessjn(2, x);
+    data[i*4+3] = bessjn(3, x);
+  }
+  return data;
+}
+
+// Plain circular crop: the cover-fit square portrait is masked by r <= 1
+// (a simple disk), so every grain keeps the photo's true proportions; only
+// the curtain in the square's corners is lost, not the face geometry.
+
+// ---------------------------------------------------------------------
+// Mesh builders
+// ---------------------------------------------------------------------
+function buildDiscMesh(rings, segs) {
+  const vcount = 1 + rings * segs;
+  const positions = new Float32Array(vcount * 2);
+  positions[0] = 0; positions[1] = 0;
+  for (let i = 1; i <= rings; i++) {
+    const rad = i / rings;
+    for (let j = 0; j < segs; j++) {
+      const ang = (j / segs) * Math.PI * 2;
+      const idx = 1 + (i - 1) * segs + j;
+      positions[idx*2] = Math.cos(ang) * rad;
+      positions[idx*2+1] = Math.sin(ang) * rad;
+    }
+  }
+  const indices = [];
+  for (let j = 0; j < segs; j++) {
+    const a = 0, b = 1 + j, c = 1 + ((j+1) % segs);
+    indices.push(a, c, b);
+  }
+  for (let i = 1; i < rings; i++) {
+    for (let j = 0; j < segs; j++) {
+      const a = 1 + (i-1)*segs + j;
+      const b = 1 + (i-1)*segs + ((j+1) % segs);
+      const c = 1 + i*segs + j;
+      const d = 1 + i*segs + ((j+1) % segs);
+      indices.push(a, d, b);
+      indices.push(a, c, d);
+    }
+  }
+  return { positions, indices: new Uint32Array(indices) };
+}
+
+function buildShellMesh() {
+  const SEGS = 192;
+  const verts = [];
+  const indices = [];
+  // shell wall: straight cylinder just below the rim
+  const shellR = 0.965, yTop = -0.015, yBot = -0.33;
+  const shellColor = [0.085, 0.055, 0.04];
+  const baseWall = 0;
+  for (let j = 0; j <= SEGS; j++) {
+    const ang = (j / SEGS) * Math.PI * 2;
+    const cx = Math.cos(ang), cz = Math.sin(ang);
+    verts.push(cx*shellR, yTop, cz*shellR, cx, 0, cz, ...shellColor);
+    verts.push(cx*shellR, yBot, cz*shellR, cx, 0, cz, ...shellColor);
+  }
+  for (let j = 0; j < SEGS; j++) {
+    const a = baseWall + j*2, b = baseWall + j*2 + 1, c = baseWall + (j+1)*2, d = baseWall + (j+1)*2 + 1;
+    indices.push(a, c, b, b, c, d);
+  }
+  // rim: torus hoop sitting around the membrane edge
+  const baseRim = verts.length / 9;
+  const RING_SEGS = 192, TUBE_SEGS = 20;
+  const centerlineR = 1.016, tubeR = 0.05, torusY = -0.018;
+  const rimColor = [0.42, 0.33, 0.20];
+  for (let i = 0; i <= RING_SEGS; i++) {
+    const theta = (i / RING_SEGS) * Math.PI * 2;
+    const ct = Math.cos(theta), st = Math.sin(theta);
+    for (let j = 0; j <= TUBE_SEGS; j++) {
+      const phi = (j / TUBE_SEGS) * Math.PI * 2;
+      const nx = Math.cos(phi)*ct, ny = Math.sin(phi), nz = Math.cos(phi)*st;
+      const px = ct*centerlineR + nx*tubeR;
+      const py = torusY + ny*tubeR;
+      const pz = st*centerlineR + nz*tubeR;
+      verts.push(px, py, pz, nx, ny, nz, ...rimColor);
+    }
+  }
+  const rowLen = TUBE_SEGS + 1;
+  for (let i = 0; i < RING_SEGS; i++) {
+    for (let j = 0; j < TUBE_SEGS; j++) {
+      const a = baseRim + i*rowLen + j;
+      const b = baseRim + i*rowLen + j + 1;
+      const c = baseRim + (i+1)*rowLen + j;
+      const d = baseRim + (i+1)*rowLen + j + 1;
+      indices.push(a, b, c, b, d, c);
+    }
+  }
+  return { vertices: new Float32Array(verts), indices: new Uint32Array(indices) };
+}
+
+// ---------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------
+async function main() {
+  if (!("gpu" in navigator)) {
+    showMessage("This experiment needs <b>WebGPU</b>, which your browser doesn't expose. Try a recent desktop Chrome or Edge, or Safari Technology Preview with WebGPU enabled.");
+    return;
+  }
+
+  let adapter, device;
+  try {
+    adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) throw new Error("no adapter");
+    device = await adapter.requestDevice();
+  } catch (err) {
+    showMessage("WebGPU is present but couldn't start (" + (err && err.message ? err.message : "unknown error") + "). Try updating your graphics drivers or using a recent desktop Chrome/Edge.");
+    return;
+  }
+
+  device.addEventListener("uncapturederror", (ev) => {
+    console.error("WebGPU uncaptured error:", ev.error.message);
+  });
+  device.lost.then((info) => {
+    console.error("WebGPU device lost:", info.message);
+    gpuLost = true;
+    showMessage("GPU context lost &mdash; <b>click to reload</b>.");
+    msgEl.style.cursor = "pointer";
+    msgEl.addEventListener("click", () => location.reload(), { once: true });
+  });
+
+  const context = canvas.getContext("webgpu");
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  context.configure({ device, format, alphaMode: "opaque" });
+
+  // -----------------------------------------------------------------
+  // Portrait -> grains (home position via concentric square->disk map)
+  // -----------------------------------------------------------------
+  async function loadBitmap() {
+    for (const src of IMAGE_CANDIDATES) {
+      try {
+        const resp = await fetch(src);
+        if (!resp.ok) continue;
+        const blob = await resp.blob();
+        return await createImageBitmap(blob);
+      } catch (e) { /* try next */ }
+    }
+    throw new Error("portrait image failed to load");
+  }
+  const bitmap = await loadBitmap();
+  const off = document.createElement("canvas");
+  off.width = GRID; off.height = GRID;
+  const octx = off.getContext("2d");
+  octx.imageSmoothingEnabled = true;
+  octx.imageSmoothingQuality = "high";
+  octx.drawImage(bitmap, 0, 0, GRID, GRID);
+  const pixels = octx.getImageData(0, 0, GRID, GRID).data;
+
+  const homeDataMax = new Float32Array(PARTICLE_COUNT * 2);
+  const colorDataMax = new Uint32Array(PARTICLE_COUNT);
+  const stateDataMax = new Float32Array(PARTICLE_COUNT * 8);
+
+  const cell = 2 / (GRID - 1);
+  let n = 0;
+  for (let row = 0; row < GRID; row++) {
+    for (let col = 0; col < GRID; col++) {
+      const u0 = (col / (GRID - 1)) * 2 - 1;
+      const v0 = (row / (GRID - 1)) * 2 - 1;
+      if (u0*u0 + v0*v0 > 1.0) continue; // outside the drum circle: drop (only corners lost)
+      let u = u0 + (Math.random() - 0.5) * cell * 0.8;
+      let v = v0 + (Math.random() - 0.5) * cell * 0.8;
+      const hx = u * GRAIN_R, hy = v * GRAIN_R;
+      homeDataMax[n*2] = hx; homeDataMax[n*2+1] = hy;
+      stateDataMax[n*8+0] = hx; stateDataMax[n*8+1] = hy; // pos
+      stateDataMax[n*8+2] = 0;  stateDataMax[n*8+3] = 0;  // vel
+      stateDataMax[n*8+4] = 0;  stateDataMax[n*8+5] = 0;  // z, vz
+      const pi = (row * GRID + col) * 4;
+      const r = pixels[pi], g = pixels[pi+1], b = pixels[pi+2];
+      colorDataMax[n] = (r | (g << 8) | (b << 16) | (255 << 24)) >>> 0;
+      n++;
+    }
+  }
+  PARTICLE_COUNT = n;
+  const homeData = homeDataMax.subarray(0, n * 2);
+  const colorData = colorDataMax.subarray(0, n);
+  const stateData = stateDataMax.subarray(0, n * 8);
+
+  // -----------------------------------------------------------------
+  // GPU buffers
+  // -----------------------------------------------------------------
+  const lutData = buildBesselLUT();
+  const lutBuffer = device.createBuffer({ size: lutData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(lutBuffer, 0, lutData);
+
+  const modesData = new Float32Array(NUM_MODES * 4);
+  const modesBuffer = device.createBuffer({ size: modesData.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  const SIM_FLOATS = 24;
+  const simData = new Float32Array(SIM_FLOATS);
+  const simBuffer = device.createBuffer({ size: SIM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  const SCENE_FLOATS = 32;
+  const sceneData = new Float32Array(SCENE_FLOATS);
+  const sceneBuffer = device.createBuffer({ size: SCENE_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  const homeBuffer = device.createBuffer({ size: homeData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(homeBuffer, 0, homeData);
+  const colorBuffer = device.createBuffer({ size: colorData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(colorBuffer, 0, colorData);
+  const stateBuffer = device.createBuffer({ size: stateData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+  device.queue.writeBuffer(stateBuffer, 0, stateData);
+  const readbackBuffer = device.createBuffer({ size: stateData.byteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+
+  const discMesh = buildDiscMesh(128, 256);
+  const discVertBuffer = device.createBuffer({ size: discMesh.positions.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(discVertBuffer, 0, discMesh.positions);
+  const discIdxBuffer = device.createBuffer({ size: discMesh.indices.byteLength + (discMesh.indices.byteLength % 4), usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(discIdxBuffer, 0, discMesh.indices);
+  const discIndexCount = discMesh.indices.length;
+
+  const shellMesh = buildShellMesh();
+  const shellVertBuffer = device.createBuffer({ size: shellMesh.vertices.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(shellVertBuffer, 0, shellMesh.vertices);
+  const shellIdxBuffer = device.createBuffer({ size: shellMesh.indices.byteLength + (shellMesh.indices.byteLength % 4), usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(shellIdxBuffer, 0, shellMesh.indices);
+  const shellIndexCount = shellMesh.indices.length;
+
+  // -----------------------------------------------------------------
+  // Shared WGSL
+  // -----------------------------------------------------------------
+  const COMMON_WGSL = `
+    const PI: f32 = 3.14159265358979;
+    const LUT_SIZE: u32 = ${LUT_SIZE}u;
+    const LUT_XMAX: f32 = ${LUT_XMAX.toFixed(2)};
+    const NUM_MODES: u32 = ${NUM_MODES}u;
+    const DISP_SCALE: f32 = 0.085;
+    const SHADE_BOOST: f32 = 6.0; // visual-only slope amplification for lighting (not physics)
+
+    fn besselSample(mIdx: u32, x: f32) -> f32 {
+      let xc = clamp(x, 0.0, LUT_XMAX);
+      let f = xc / LUT_XMAX * f32(LUT_SIZE - 1u);
+      let i0 = u32(floor(f));
+      let i1 = min(i0 + 1u, LUT_SIZE - 1u);
+      let frac = f - floor(f);
+      let a = lutBuf[i0];
+      let b = lutBuf[i1];
+      return mix(a[mIdx], b[mIdx], frac);
+    }
+
+    // returns (height, d(height)/dt)
+    fn modeHeightVel(pos: vec2f, t: f32) -> vec2f {
+      let r = length(pos);
+      let theta = atan2(pos.y, pos.x);
+      var h = 0.0;
+      var dh = 0.0;
+      for (var i = 0u; i < NUM_MODES; i = i + 1u) {
+        let md = modesBuf[i];
+        let m = md.x; let kR = md.y; let omega = md.z; let amp = md.w;
+        let x = kR * min(r, 1.0);
+        let j = besselSample(u32(m), x);
+        let ang = cos(m * theta);
+        let s = sin(omega * t);
+        let c = cos(omega * t);
+        h = h + amp * j * ang * s;
+        dh = dh + amp * j * ang * omega * c;
+      }
+      return vec2f(h * DISP_SCALE, dh * DISP_SCALE);
+    }
+
+    fn hash21(p: vec2f) -> f32 {
+      var p3 = fract(vec3f(p.x, p.y, p.x) * 0.1031);
+      p3 = p3 + dot(p3, p3.yzx + 33.33);
+      return fract((p3.x + p3.y) * p3.z);
+    }
+  `;
+
+  // -----------------------------------------------------------------
+  // Compute pipeline: grain physics
+  // -----------------------------------------------------------------
+  const computeModule = device.createShaderModule({
+    label: "drum-compute",
+    code: `
+      struct Grain { pos: vec2f, vel: vec2f, z: f32, vz: f32, pad0: f32, pad1: f32 };
+      struct SimParams {
+        time: f32, dt: f32, audioAmp: f32, gravity: f32,
+        launchThresh: f32, couple: f32, maxLaunchVel: f32, kickRandom: f32,
+        kickSlope: f32, springQuiet: f32, springLoud: f32, dampingGround: f32,
+        airDrag: f32, rMaxGrain: f32, pad2: f32, pad3: f32,
+        pad4: f32, pad5: f32, pad6: f32, pad7: f32,
+        pad8: f32, pad9: f32, pad10: f32, pad11: f32,
+      };
+
+      @group(0) @binding(0) var<storage, read_write> stateBuf: array<Grain>;
+      @group(0) @binding(1) var<storage, read> homeBuf: array<vec2f>;
+      @group(0) @binding(2) var<uniform> modesBuf: array<vec4f, ${NUM_MODES}>;
+      @group(0) @binding(3) var<storage, read> lutBuf: array<vec4f>;
+      @group(0) @binding(4) var<uniform> P: SimParams;
+
+      ${COMMON_WGSL}
+
+      @compute @workgroup_size(64)
+      fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+        let idx = gid.x;
+        if (idx >= arrayLength(&stateBuf)) { return; }
+
+        var g = stateBuf[idx];
+        let home = homeBuf[idx];
+
+        let hv = modeHeightVel(g.pos, P.time);
+        let dhdt = hv.y;
+
+        let eps = 0.012;
+        let h0 = modeHeightVel(g.pos, P.time).x;
+        let hx = modeHeightVel(g.pos + vec2f(eps, 0.0), P.time).x;
+        let hy = modeHeightVel(g.pos + vec2f(0.0, eps), P.time).x;
+        let gx = (hx - h0) / eps;
+        let gy = (hy - h0) / eps;
+
+        if (g.z <= 0.0001) {
+          g.z = 0.0;
+          if (dhdt > P.launchThresh) {
+            g.vz = min(dhdt * P.couple, P.maxLaunchVel);
+            g.z = 0.0008;
+          } else {
+            g.vz = 0.0;
+            let springK = mix(P.springQuiet, P.springLoud, clamp(P.audioAmp, 0.0, 1.0));
+            let accel = (home - g.pos) * springK - g.vel * P.dampingGround;
+            g.vel = g.vel + accel * P.dt;
+            g.pos = g.pos + g.vel * P.dt;
+          }
+        } else {
+          g.vz = g.vz + P.gravity * P.dt;
+          g.z = g.z + g.vz * P.dt;
+          let n1 = hash21(g.pos * 311.7 + vec2f(P.time * 1.3, f32(idx) * 0.0001));
+          let n2 = hash21(g.pos * 411.3 + vec2f(f32(idx) * 0.0001, P.time * 1.7));
+          let randDir = vec2f(n1 - 0.5, n2 - 0.5) * 2.0;
+          var slopeDir = vec2f(-gx, -gy);
+          let slen = length(slopeDir);
+          if (slen > 1e-4) { slopeDir = slopeDir / slen; } else { slopeDir = vec2f(0.0, 0.0); }
+          let kick = (randDir * P.kickRandom + slopeDir * P.kickSlope) * clamp(P.audioAmp, 0.0, 1.0);
+          g.vel = g.vel + kick * P.dt;
+          g.vel = g.vel * (1.0 - P.airDrag * P.dt);
+          g.pos = g.pos + g.vel * P.dt;
+          if (g.z <= 0.0) { g.z = 0.0; g.vz = 0.0; }
+        }
+
+        let rr = length(g.pos);
+        if (rr > P.rMaxGrain) {
+          g.pos = g.pos * (P.rMaxGrain / rr);
+          g.vel = g.vel * 0.3;
+        }
+
+        stateBuf[idx] = g;
+      }
+    `,
+  });
+  const computePipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: computeModule, entryPoint: "main" },
+  });
+  const computeBindGroup = device.createBindGroup({
+    layout: computePipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: stateBuffer } },
+      { binding: 1, resource: { buffer: homeBuffer } },
+      { binding: 2, resource: { buffer: modesBuffer } },
+      { binding: 3, resource: { buffer: lutBuffer } },
+      { binding: 4, resource: { buffer: simBuffer } },
+    ],
+  });
+
+  // -----------------------------------------------------------------
+  // Render: shared Scene struct
+  // -----------------------------------------------------------------
+  const SCENE_STRUCT = `
+    struct Scene {
+      viewProj: mat4x4f,
+      camRight: vec4f,
+      camUp: vec4f,
+      lightDir: vec4f,
+      misc: vec4f, // x=time, y=dt, z=grainSize, w=shadowK
+    };
+  `;
+
+  // -----------------------------------------------------------------
+  // Membrane render pipeline
+  // -----------------------------------------------------------------
+  const membraneModule = device.createShaderModule({
+    label: "drum-membrane",
+    code: `
+      ${SCENE_STRUCT}
+      @group(0) @binding(0) var<uniform> modesBuf: array<vec4f, ${NUM_MODES}>;
+      @group(0) @binding(1) var<storage, read> lutBuf: array<vec4f>;
+      @group(0) @binding(2) var<uniform> scene: Scene;
+
+      ${COMMON_WGSL}
+
+      struct VSOut {
+        @builtin(position) pos: vec4f,
+        @location(0) normal: vec3f,
+        @location(1) worldPos: vec3f,
+      };
+
+      @vertex
+      fn vs(@location(0) uv: vec2f) -> VSOut {
+        let t = scene.misc.x;
+        let hv = modeHeightVel(uv, t);
+        let eps = 0.01;
+        let hx = modeHeightVel(uv + vec2f(eps, 0.0), t).x;
+        let hy = modeHeightVel(uv + vec2f(0.0, eps), t).x;
+        let gx = (hx - hv.x) / eps;
+        let gy = (hy - hv.x) / eps;
+        let normal = normalize(vec3f(-gx * SHADE_BOOST, 1.0, -gy * SHADE_BOOST));
+        let world = vec3f(uv.x, hv.x, uv.y);
+        var out: VSOut;
+        out.pos = scene.viewProj * vec4f(world, 1.0);
+        out.normal = normal;
+        out.worldPos = world;
+        return out;
+      }
+
+      @fragment
+      fn fs(in: VSOut) -> @location(0) vec4f {
+        let L = normalize(scene.lightDir.xyz);
+        let N = normalize(in.normal);
+        let diff = max(dot(N, L), 0.0);
+        let n = hash21(in.worldPos.xz * 180.0);
+        let tex = 1.0 + (n - 0.5) * 0.08;
+        // deep warm-grey calfskin: gaps between grains should read as shadow,
+        // not bright "snow", and the darker base makes the lit mode-shape
+        // shading visible even where no grains currently cover the skin.
+        let base = vec3f(0.155, 0.13, 0.112) * tex;
+        let ambient = 0.33;
+        var col = base * (ambient + diff * 0.95);
+        let r = length(in.worldPos.xz);
+        let edge = smoothstep(0.82, 1.0, r);
+        col = mix(col, col * 0.78, edge);
+        return vec4f(col, 1.0);
+      }
+    `,
+  });
+  const depthFormat = "depth24plus";
+  const membranePipeline = device.createRenderPipeline({
+    layout: "auto",
+    vertex: {
+      module: membraneModule, entryPoint: "vs",
+      buffers: [{ arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }] }],
+    },
+    fragment: { module: membraneModule, entryPoint: "fs", targets: [{ format }] },
+    primitive: { topology: "triangle-list", cullMode: "none" },
+    depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: "less" },
+  });
+  const membraneBindGroup = device.createBindGroup({
+    layout: membranePipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: modesBuffer } },
+      { binding: 1, resource: { buffer: lutBuffer } },
+      { binding: 2, resource: { buffer: sceneBuffer } },
+    ],
+  });
+
+  // -----------------------------------------------------------------
+  // Shell/rim render pipeline (static lit geometry)
+  // -----------------------------------------------------------------
+  const shellModule = device.createShaderModule({
+    label: "drum-shell",
+    code: `
+      ${SCENE_STRUCT}
+      @group(0) @binding(0) var<uniform> scene: Scene;
+
+      struct VSOut {
+        @builtin(position) pos: vec4f,
+        @location(0) normal: vec3f,
+        @location(1) color: vec3f,
+      };
+
+      @vertex
+      fn vs(@location(0) pos: vec3f, @location(1) normal: vec3f, @location(2) color: vec3f) -> VSOut {
+        var out: VSOut;
+        out.pos = scene.viewProj * vec4f(pos, 1.0);
+        out.normal = normal;
+        out.color = color;
+        return out;
+      }
+
+      @fragment
+      fn fs(in: VSOut) -> @location(0) vec4f {
+        let L = normalize(scene.lightDir.xyz);
+        let N = normalize(in.normal);
+        let diff = max(dot(N, L), 0.0);
+        let V = normalize(-in.normal);
+        let H = normalize(L + vec3f(0.3, 0.6, 0.2));
+        let spec = pow(max(dot(N, H), 0.0), 24.0) * 0.35;
+        let col = in.color * (0.32 + diff * 0.75) + vec3f(spec);
+        return vec4f(col, 1.0);
+      }
+    `,
+  });
+  const shellPipeline = device.createRenderPipeline({
+    layout: "auto",
+    vertex: {
+      module: shellModule, entryPoint: "vs",
+      buffers: [{
+        arrayStride: 36,
+        attributes: [
+          { shaderLocation: 0, offset: 0, format: "float32x3" },
+          { shaderLocation: 1, offset: 12, format: "float32x3" },
+          { shaderLocation: 2, offset: 24, format: "float32x3" },
+        ],
+      }],
+    },
+    fragment: { module: shellModule, entryPoint: "fs", targets: [{ format }] },
+    primitive: { topology: "triangle-list", cullMode: "none" },
+    depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: "less" },
+  });
+  const shellBindGroup = device.createBindGroup({
+    layout: shellPipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: sceneBuffer } }],
+  });
+
+  // -----------------------------------------------------------------
+  // Grain render pipeline (billboard quads)
+  // -----------------------------------------------------------------
+  const QUAD_WGSL = `
+    const QUAD = array<vec2f, 6>(
+      vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
+      vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
+    );
+  `;
+  const grainModule = device.createShaderModule({
+    label: "drum-grains",
+    code: `
+      ${SCENE_STRUCT}
+      struct Grain { pos: vec2f, vel: vec2f, z: f32, vz: f32, pad0: f32, pad1: f32 };
+      @group(0) @binding(0) var<storage, read> stateBuf: array<Grain>;
+      @group(0) @binding(1) var<storage, read> colorBuf: array<u32>;
+      @group(0) @binding(2) var<uniform> modesBuf: array<vec4f, ${NUM_MODES}>;
+      @group(0) @binding(3) var<storage, read> lutBuf: array<vec4f>;
+      @group(0) @binding(4) var<uniform> scene: Scene;
+
+      ${COMMON_WGSL}
+      ${QUAD_WGSL}
+
+      struct VSOut {
+        @builtin(position) pos: vec4f,
+        @location(0) uv: vec2f,
+        @location(1) color: vec4f,
+        @location(2) lit: f32,
+      };
+
+      @vertex
+      fn vs(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> VSOut {
+        let g = stateBuf[iid];
+        let t = scene.misc.x;
+        let hv = modeHeightVel(g.pos, t);
+        // lift grains a hair above the skin: at rest they are otherwise exactly
+        // coplanar with the membrane mesh, which z-fights against the disc's
+        // polar ring topology and shows up as concentric moire at rest.
+        let worldY = hv.x + g.z + 0.0028;
+        let world = vec3f(g.pos.x, worldY, g.pos.y);
+        let corner = QUAD[vid];
+        let size = scene.misc.z;
+        let worldPos = world + scene.camRight.xyz * corner.x * size + scene.camUp.xyz * corner.y * size;
+        var out: VSOut;
+        out.pos = scene.viewProj * vec4f(worldPos, 1.0);
+        out.uv = corner;
+        out.color = unpack4x8unorm(colorBuf[iid]);
+        // shade grains by the local membrane normal so the mode shapes read
+        // as a moving light gradient across the sand, not just a flat image.
+        let eps = 0.012;
+        let hx = modeHeightVel(g.pos + vec2f(eps, 0.0), t).x;
+        let hy = modeHeightVel(g.pos + vec2f(0.0, eps), t).x;
+        let gx = (hx - hv.x) / eps;
+        let gy = (hy - hv.x) / eps;
+        let normal = normalize(vec3f(-gx * SHADE_BOOST, 1.0, -gy * SHADE_BOOST));
+        let L = normalize(scene.lightDir.xyz);
+        let diffuse = 0.45 + 0.85 * max(dot(normal, L), 0.0);
+        out.lit = clamp(1.0 - g.z * 2.2, 0.72, 1.0) * diffuse;
+        return out;
+      }
+
+      @fragment
+      fn fs(in: VSOut) -> @location(0) vec4f {
+        let r2 = dot(in.uv, in.uv);
+        if (r2 > 1.0) { discard; }
+        let shade = mix(1.0, 0.8, smoothstep(0.0, 1.0, r2)) * in.lit;
+        return vec4f(in.color.rgb * shade, 1.0);
+      }
+    `,
+  });
+  const grainPipeline = device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: grainModule, entryPoint: "vs" },
+    fragment: { module: grainModule, entryPoint: "fs", targets: [{ format }] },
+    primitive: { topology: "triangle-list", cullMode: "none" },
+    depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: "less" },
+  });
+  const grainBindGroup = device.createBindGroup({
+    layout: grainPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: stateBuffer } },
+      { binding: 1, resource: { buffer: colorBuffer } },
+      { binding: 2, resource: { buffer: modesBuffer } },
+      { binding: 3, resource: { buffer: lutBuffer } },
+      { binding: 4, resource: { buffer: sceneBuffer } },
+    ],
+  });
+
+  // -----------------------------------------------------------------
+  // Shadow render pipeline (faint contact shadows for airborne grains)
+  // -----------------------------------------------------------------
+  const shadowModule = device.createShaderModule({
+    label: "drum-shadow",
+    code: `
+      ${SCENE_STRUCT}
+      struct Grain { pos: vec2f, vel: vec2f, z: f32, vz: f32, pad0: f32, pad1: f32 };
+      @group(0) @binding(0) var<storage, read> stateBuf: array<Grain>;
+      @group(0) @binding(1) var<uniform> modesBuf: array<vec4f, ${NUM_MODES}>;
+      @group(0) @binding(2) var<storage, read> lutBuf: array<vec4f>;
+      @group(0) @binding(3) var<uniform> scene: Scene;
+
+      ${COMMON_WGSL}
+      ${QUAD_WGSL}
+
+      struct VSOut {
+        @builtin(position) pos: vec4f,
+        @location(0) uv: vec2f,
+        @location(1) alpha: f32,
+      };
+
+      @vertex
+      fn vs(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> VSOut {
+        let g = stateBuf[iid];
+        var out: VSOut;
+        if (g.z < 0.0015) {
+          out.pos = vec4f(2.0, 2.0, 2.0, 1.0); // cull: degenerate, offscreen
+          out.uv = vec2f(0.0);
+          out.alpha = 0.0;
+          return out;
+        }
+        let t = scene.misc.x;
+        let h = modeHeightVel(g.pos, t).x;
+        let world = vec3f(g.pos.x, h + 0.0015, g.pos.y);
+        let corner = QUAD[vid];
+        let size = scene.misc.z * 1.7;
+        let worldPos = world + scene.camRight.xyz * corner.x * size + scene.camUp.xyz * corner.y * size;
+        out.pos = scene.viewProj * vec4f(worldPos, 1.0);
+        out.uv = corner;
+        let k = scene.misc.w;
+        out.alpha = clamp(g.z * k, 0.0, 0.55);
+        return out;
+      }
+
+      @fragment
+      fn fs(in: VSOut) -> @location(0) vec4f {
+        let r2 = dot(in.uv, in.uv);
+        if (r2 > 1.0) { discard; }
+        let a = in.alpha * smoothstep(1.0, 0.0, r2);
+        return vec4f(0.0, 0.0, 0.0, a);
+      }
+    `,
+  });
+  const shadowPipeline = device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: shadowModule, entryPoint: "vs" },
+    fragment: {
+      module: shadowModule, entryPoint: "fs",
+      targets: [{ format, blend: {
+        color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+        alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+      } }],
+    },
+    primitive: { topology: "triangle-list", cullMode: "none" },
+    depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: "less" },
+  });
+  const shadowBindGroup = device.createBindGroup({
+    layout: shadowPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: stateBuffer } },
+      { binding: 1, resource: { buffer: modesBuffer } },
+      { binding: 2, resource: { buffer: lutBuffer } },
+      { binding: 3, resource: { buffer: sceneBuffer } },
+    ],
+  });
+
+  // -----------------------------------------------------------------
+  // Canvas / depth texture sizing
+  // -----------------------------------------------------------------
+  let depthTexture = null, depthView = null;
+  let aspect = 1;
+  const FOVY = 0.56; // ~32 deg
+  let grainSizeWorld = (2 * GRAIN_R / GRID) * 0.95;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.max(1, Math.round(window.innerWidth * dpr));
+    const h = Math.max(1, Math.round(window.innerHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      if (depthTexture) depthTexture.destroy();
+      depthTexture = device.createTexture({
+        size: [w, h], format: depthFormat,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      depthView = depthTexture.createView();
+    }
+    aspect = w / h;
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // -----------------------------------------------------------------
+  // Audio graph (Web Audio AnalyserNode)
+  // -----------------------------------------------------------------
+  const audioEl = document.createElement("audio");
+  audioEl.loop = true;
+  audioEl.preload = "auto";
+  audioEl.crossOrigin = "anonymous";
+
+  let audioCtx = null, analyser = null, mediaSource = null, freqData = null;
+  let isPlaying = false;
+  let currentTrack = 0;
+
+  function ensureGraph() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.5;
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    mediaSource = audioCtx.createMediaElementSource(audioEl);
+    mediaSource.connect(analyser);
+    analyser.connect(audioCtx.destination);
+  }
+
+  function trackUrl(baseIndex, file) { return AUDIO_BASES[baseIndex] + file + ".mp3"; }
+
+  function setTrack(index, autoplay) {
+    currentTrack = index;
+    const file = TRACKS[index].file;
+    let baseIndex = 0;
+    audioEl.src = trackUrl(baseIndex, file);
+    const onErr2 = () => setStatus("track failed to load: " + file);
+    const onErr = () => {
+      baseIndex++;
+      if (baseIndex < AUDIO_BASES.length) {
+        audioEl.removeEventListener("error", onErr);
+        audioEl.src = trackUrl(baseIndex, file);
+        audioEl.addEventListener("error", onErr2, { once: true });
+        if (autoplay) audioEl.play().catch(() => {});
+      } else {
+        setStatus("track failed to load: " + file);
+      }
+    };
+    audioEl.addEventListener("error", onErr, { once: true });
+    audioEl.load();
+    if (autoplay) audioEl.play().catch(() => {});
+    updateTrackButtons();
+  }
+
+  function play() {
+    ensureGraph();
+    if (!audioEl.src) setTrack(currentTrack, false);
+    audioCtx.resume();
+    audioEl.play().then(() => {
+      isPlaying = true;
+      setStatus("playing — " + TRACKS[currentTrack].label);
+    }).catch((err) => setStatus("playback blocked: " + err.message));
+  }
+  function pause() { audioEl.pause(); isPlaying = false; setStatus("paused"); }
+  function togglePlay() { if (isPlaying) pause(); else play(); }
+
+  let started = false;
+  function startFromOverlay() {
+    if (started) return;
+    started = true;
+    overlay.classList.add("hidden");
+    play();
+  }
+  overlay.addEventListener("click", startFromOverlay);
+  canvas.addEventListener("click", () => {
+    if (!started) { startFromOverlay(); return; }
+    togglePlay();
+  });
+
+  const tracksEl = document.getElementById("tracks");
+  const trackButtons = [];
+  TRACKS.forEach((tr, i) => {
+    const btn = document.createElement("button");
+    btn.className = "track-btn";
+    btn.type = "button";
+    btn.textContent = tr.label;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      ensureGraph();
+      setTrack(i, true);
+      if (!started) { started = true; overlay.classList.add("hidden"); }
+      audioCtx.resume();
+      audioEl.play().then(() => {
+        isPlaying = true;
+        setStatus("playing — " + TRACKS[i].label);
+      }).catch((err) => setStatus("playback blocked: " + err.message));
+    });
+    tracksEl.appendChild(btn);
+    trackButtons.push(btn);
+  });
+  function updateTrackButtons() { trackButtons.forEach((b, i) => b.classList.toggle("active", i === currentTrack)); }
+  updateTrackButtons();
+  setTrack(0, false);
+
+  // -----------------------------------------------------------------
+  // Audio analysis -> mode amplitudes, with adaptive gain + "above a
+  // short running mean" so sustained/ambient tracks keep driving events
+  // instead of saturating near a flat 1.0.
+  // -----------------------------------------------------------------
+  const bandRunningMax = new Array(NUM_MODES).fill(0.05);
+  const BAND_FLOOR = 0.035, BAND_MAX_DECAY = 0.996;
+  const bandShortMean = new Array(NUM_MODES).fill(0.2);
+
+  let loudRunningMax = 0.04;
+  const LOUD_FLOOR = 0.025, LOUD_MAX_DECAY = 0.995;
+  let loudnessEnv = 0;
+  let strike = 0, onsetCooldown = 0;
+  let audioAmpOverall = 0;
+  const modeAmplitudes = new Array(NUM_MODES).fill(0);
+
+  function follow(prev, target, kUp, kDown) {
+    const k = target > prev ? kUp : kDown;
+    return prev + (target - prev) * k;
+  }
+
+  function updateAudio(dt) {
+    if (!analyser) {
+      audioAmpOverall = follow(audioAmpOverall, 0, 0.1, 0.06);
+      strike *= Math.exp(-6.0 * dt);
+      for (let i = 0; i < NUM_MODES; i++) modeAmplitudes[i] *= 0.9;
+      return;
+    }
+    analyser.getByteFrequencyData(freqData);
+    const sampleRate = audioCtx.sampleRate;
+    const binHz = sampleRate / 2 / freqData.length;
+
+    const bandRaw = new Array(NUM_MODES);
+    for (let b = 0; b < NUM_MODES; b++) {
+      const loBin = Math.max(0, Math.floor(BAND_EDGES[b] / binHz));
+      const hiBin = Math.min(freqData.length - 1, Math.ceil(BAND_EDGES[b+1] / binHz));
+      let sum = 0, n = 0;
+      for (let i = loBin; i <= hiBin; i++) { sum += freqData[i]; n++; }
+      bandRaw[b] = (n ? sum / n : 0) / 255;
+    }
+
+    let overallSum = 0;
+    for (let i = 0; i < freqData.length; i++) overallSum += freqData[i];
+    const loudRaw = (overallSum / freqData.length) / 255;
+
+    const normBand = new Array(NUM_MODES);
+    for (let b = 0; b < NUM_MODES; b++) {
+      bandRunningMax[b] = Math.max(bandRunningMax[b] * BAND_MAX_DECAY, bandRaw[b], BAND_FLOOR);
+      normBand[b] = Math.min(1.3, bandRaw[b] / bandRunningMax[b]);
+      bandShortMean[b] = follow(bandShortMean[b], normBand[b], 0.05, 0.02);
+      const aboveMean = Math.max(0, normBand[b] - bandShortMean[b]);
+      const target = Math.min(1.3, 0.28 * normBand[b] + 1.15 * aboveMean);
+      modeAmplitudes[b] = follow(modeAmplitudes[b], target, 0.35, 0.08);
+    }
+
+    loudRunningMax = Math.max(loudRunningMax * LOUD_MAX_DECAY, loudRaw, LOUD_FLOOR);
+    const loudNorm = Math.min(1.2, loudRaw / loudRunningMax);
+
+    loudnessEnv = follow(loudnessEnv, loudNorm, 0.04, 0.02);
+    onsetCooldown = Math.max(0, onsetCooldown - dt);
+    const flux = loudNorm - loudnessEnv;
+    if (flux > 0.20 && loudNorm > 0.28 && onsetCooldown <= 0) {
+      strike = 1.0;
+      onsetCooldown = 0.16;
+    }
+    strike *= Math.exp(-5.0 * dt);
+
+    let maxModeAmp = 0;
+    for (let b = 0; b < NUM_MODES; b++) maxModeAmp = Math.max(maxModeAmp, modeAmplitudes[b]);
+    audioAmpOverall = follow(audioAmpOverall, Math.min(1, Math.max(loudNorm, maxModeAmp)), 0.25, 0.05);
+  }
+
+  // -----------------------------------------------------------------
+  // Camera: slow drift within a front-facing arc, no roll.
+  // -----------------------------------------------------------------
+  const YAW_LIMIT = 25 * Math.PI / 180;
+  const PITCH_MIN = 30 * Math.PI / 180, PITCH_MAX = 55 * Math.PI / 180;
+  const target = [0, -0.10, 0];
+
+  function computeCamera(t) {
+    const yaw = Math.sin(t * 0.055) * YAW_LIMIT;
+    const pitchT = 0.5 + 0.5 * Math.sin(t * 0.037 + 1.3);
+    const pitch = PITCH_MIN + (PITCH_MAX - PITCH_MIN) * pitchT;
+    const extent = DRUM_R * 1.2;
+    const distForWidth = extent / (Math.max(aspect, 0.001) * Math.tan(FOVY / 2)) * 1.08;
+    const distForHeight = extent / Math.tan(FOVY / 2) * 1.15;
+    const radius = Math.max(distForWidth, distForHeight, 1.6);
+    const eye = [
+      target[0] + radius * Math.cos(pitch) * Math.sin(yaw),
+      target[1] + radius * Math.sin(pitch),
+      target[2] + radius * Math.cos(pitch) * Math.cos(yaw),
+    ];
+    const { m: view, right, up } = mat4LookAt(eye, target, [0, 1, 0]);
+    const proj = mat4PerspectiveWebGPU(FOVY, aspect, 0.05, 40);
+    const viewProj = mat4Multiply(proj, view);
+    return { viewProj, right, up };
+  }
+
+  // -----------------------------------------------------------------
+  // Main loop
+  // -----------------------------------------------------------------
+  let lastTime = performance.now();
+  const startTime = lastTime;
+
+  function frame(now) {
+    const t = (now - startTime) / 1000;
+    const dt = Math.min((now - lastTime) / 1000, 1 / 30);
+    lastTime = now;
+
+    updateAudio(dt);
+
+    for (let i = 0; i < NUM_MODES; i++) {
+      const md = MODE_DEFS[i];
+      const amp = (modeAmplitudes[i] + strike * STRIKE_WEIGHT[i] * 0.85) * DISP_WEIGHT[i];
+      modesData[i*4+0] = md.m;
+      modesData[i*4+1] = md.k;
+      modesData[i*4+2] = md.omega;
+      modesData[i*4+3] = Math.min(2.2, amp);
+    }
+    device.queue.writeBuffer(modesBuffer, 0, modesData);
+
+    simData[0] = t; simData[1] = dt; simData[2] = audioAmpOverall; simData[3] = PHYS.gravity;
+    simData[4] = PHYS.launchThresh; simData[5] = PHYS.couple; simData[6] = PHYS.maxLaunchVel; simData[7] = PHYS.kickRandom;
+    simData[8] = PHYS.kickSlope; simData[9] = PHYS.springQuiet; simData[10] = PHYS.springLoud; simData[11] = PHYS.dampingGround;
+    simData[12] = PHYS.airDrag; simData[13] = PHYS.rMaxGrain;
+    device.queue.writeBuffer(simBuffer, 0, simData);
+
+    const { viewProj, right, up } = computeCamera(t);
+    sceneData.set(viewProj, 0);
+    sceneData[16] = right[0]; sceneData[17] = right[1]; sceneData[18] = right[2]; sceneData[19] = 0;
+    sceneData[20] = up[0]; sceneData[21] = up[1]; sceneData[22] = up[2]; sceneData[23] = 0;
+    sceneData[24] = 0.70; sceneData[25] = 0.58; sceneData[26] = 0.32; sceneData[27] = 0;
+    sceneData[28] = t; sceneData[29] = dt; sceneData[30] = grainSizeWorld; sceneData[31] = 55.0;
+    device.queue.writeBuffer(sceneBuffer, 0, sceneData);
+
+    const encoder = device.createCommandEncoder();
+
+    const computePass = encoder.beginComputePass();
+    computePass.setPipeline(computePipeline);
+    computePass.setBindGroup(0, computeBindGroup);
+    computePass.dispatchWorkgroups(Math.ceil(PARTICLE_COUNT / 64));
+    computePass.end();
+
+    const renderPass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: context.getCurrentTexture().createView(),
+        clearValue: { r: 0.025, g: 0.03, b: 0.04, a: 1 },
+        loadOp: "clear", storeOp: "store",
+      }],
+      depthStencilAttachment: {
+        view: depthView, depthClearValue: 1.0, depthLoadOp: "clear", depthStoreOp: "store",
+      },
+    });
+
+    renderPass.setPipeline(shellPipeline);
+    renderPass.setBindGroup(0, shellBindGroup);
+    renderPass.setVertexBuffer(0, shellVertBuffer);
+    renderPass.setIndexBuffer(shellIdxBuffer, "uint32");
+    renderPass.drawIndexed(shellIndexCount);
+
+    renderPass.setPipeline(membranePipeline);
+    renderPass.setBindGroup(0, membraneBindGroup);
+    renderPass.setVertexBuffer(0, discVertBuffer);
+    renderPass.setIndexBuffer(discIdxBuffer, "uint32");
+    renderPass.drawIndexed(discIndexCount);
+
+    renderPass.setPipeline(shadowPipeline);
+    renderPass.setBindGroup(0, shadowBindGroup);
+    renderPass.draw(6, PARTICLE_COUNT);
+
+    renderPass.setPipeline(grainPipeline);
+    renderPass.setBindGroup(0, grainBindGroup);
+    renderPass.draw(6, PARTICLE_COUNT);
+
+    renderPass.end();
+    device.queue.submit([encoder.finish()]);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // -----------------------------------------------------------------
+  // Debug hooks for automated verification.
+  // -----------------------------------------------------------------
+  window.__drum = {
+    isPlaying: () => isPlaying,
+    currentTrack: () => TRACKS[currentTrack].label,
+    seek: (s) => { audioEl.currentTime = s; },
+    getAmplitude: () => audioAmpOverall,
+    getModeAmplitudes: () => modeAmplitudes.slice(),
+    getStrike: () => strike,
+    getFreqSum: () => {
+      if (!freqData) return 0;
+      let s = 0;
+      for (let i = 0; i < freqData.length; i++) s += freqData[i];
+      return s;
+    },
+    getStats: async () => {
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(stateBuffer, 0, readbackBuffer, 0, stateData.byteLength);
+      device.queue.submit([enc.finish()]);
+      await readbackBuffer.mapAsync(GPUMapMode.READ);
+      const arr = new Float32Array(readbackBuffer.getMappedRange().slice(0));
+      readbackBuffer.unmap();
+      let airborne = 0, maxZ = 0, sumZ = 0;
+      const n = PARTICLE_COUNT;
+      for (let i = 0; i < n; i++) {
+        const z = arr[i*8+4];
+        if (z > 0.0008) { airborne++; sumZ += z; }
+        if (z > maxZ) maxZ = z;
+      }
+      return { airborneFraction: airborne / n, maxHopHeight: maxZ, avgHopHeightAirborne: airborne ? sumZ / airborne : 0 };
+    },
+  };
+}
+
+main().catch((err) => {
+  console.error(err);
+  showMessage("Something went wrong starting this experiment: " + (err && err.message ? err.message : err));
+});
+</script>
+</body>
+</html>

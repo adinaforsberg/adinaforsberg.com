@@ -1,0 +1,799 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cymatics — audio-reactive Chladni portrait</title>
+<meta name="robots" content="noindex">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #05070a;
+    color: #e8e8ea;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    width: 100vw;
+  }
+  .back-link {
+    position: fixed;
+    top: 18px;
+    left: 20px;
+    font-size: 13px;
+    letter-spacing: .02em;
+    color: #8a8a90;
+    text-decoration: none;
+    z-index: 20;
+  }
+  .back-link:hover { color: #e8e8ea; }
+
+  .stage-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 56px 16px 8px;
+  }
+  .stage {
+    /* width/height are set in px by JS (sizeStage) so the plate is always
+       exactly square, regardless of the flex area's aspect ratio */
+    position: relative;
+    border-radius: 2px;
+    overflow: hidden;
+    box-shadow: 0 0 0 1px #1c1c20, 0 40px 90px -30px rgba(0,0,0,0.8);
+    background: #0a0d12;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: pointer;
+  }
+
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: rgba(5,5,8,0.55);
+    backdrop-filter: blur(2px);
+    cursor: pointer;
+    transition: opacity .5s ease;
+    z-index: 10;
+    text-align: center;
+    padding: 20px;
+  }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  .play-ring {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: 1px solid rgba(232,232,234,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .play-ring svg { width: 18px; height: 18px; fill: #e8e8ea; margin-left: 3px; }
+  .overlay .label { font-size: 13.5px; letter-spacing: .03em; color: #e8e8ea; }
+  .overlay .sub { font-size: 12px; color: #9a9a9f; max-width: 24em; }
+
+  .msg {
+    max-width: 460px;
+    margin: 0 20px;
+    text-align: center;
+    color: rgba(235,238,245,.8);
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  .msg b { color: #fff; }
+
+  .bottom {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px 14px;
+  }
+  .caption { text-align: center; max-width: min(92vw, 640px); }
+  .caption p { margin: 0; font-size: 12.5px; line-height: 1.5; color: #9a9a9f; }
+  .caption p strong { color: #e8e8ea; font-weight: 600; }
+
+  .tracks { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; max-width: min(94vw, 620px); }
+  .track-btn {
+    appearance: none;
+    background: transparent;
+    border: 1px solid #2a2a2e;
+    color: #9a9a9f;
+    font-size: 11px;
+    letter-spacing: .03em;
+    padding: 5px 11px;
+    border-radius: 100px;
+    cursor: pointer;
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  .track-btn:hover { color: #e8e8ea; border-color: #4a4a50; }
+  .track-btn.active { color: #05070a; background: #e8e8ea; border-color: #e8e8ea; }
+
+  .status {
+    position: fixed;
+    bottom: 10px;
+    right: 14px;
+    font-size: 10.5px;
+    color: #4a4a50;
+    letter-spacing: .02em;
+    z-index: 20;
+  }
+</style>
+</head>
+<body>
+
+  <a class="back-link" href="/experiments/">&larr; experiments</a>
+
+  <div class="stage-wrap">
+    <div class="stage" id="stage">
+      <canvas id="gl"></canvas>
+      <div class="overlay" id="overlay">
+        <div class="play-ring"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
+        <div class="label">click to play</div>
+        <div class="sub">the plate is silent &mdash; her portrait rests. music wakes the sand.</div>
+      </div>
+      <div class="msg" id="msg" hidden></div>
+    </div>
+  </div>
+
+  <div class="bottom">
+    <div class="caption">
+      <p><strong>Cymatics.</strong> Her music drives the sand into Chladni figures on a vibrating plate; it settles back into her face when quiet.</p>
+    </div>
+    <div class="tracks" id="tracks"></div>
+  </div>
+
+  <div class="status" id="status">idle</div>
+
+<script type="module">
+"use strict";
+
+const GRID = 512;                 // GRID x GRID particles (~262k)
+const PARTICLE_COUNT = GRID * GRID;
+const IMAGE_CANDIDATES = ["/public/images/home-about.webp", "/images/home-about.webp"];
+const AUDIO_BASES = ["/audio/", "/public/audio/"];
+const TRACKS = [
+  { file: "droplet",        label: "Droplet" },
+  { file: "arvegods",       label: "Arvegods" },
+  { file: "tystnadens-ro",  label: "Tystnadens ro" },
+  { file: "canis-major",    label: "Canis Major" },
+  { file: "scyphozoa",      label: "Scyphozoa" },
+  { file: "maxima-minima",  label: "Maxima Minima" }
+];
+
+// Chladni mode pairs (n, m), roughly ordered from simple low-frequency figures
+// to intricate high-frequency ones. One is picked per frequency band.
+const MODES = [
+  [1, 2], [1, 3], [2, 3], [1, 4], [2, 5], [3, 5], [4, 6], [5, 7]
+];
+// band edges in Hz (length = MODES.length + 1)
+const BAND_EDGES = [40, 90, 180, 350, 700, 1400, 2800, 5600, 11000];
+
+const statusEl = document.getElementById("status");
+function setStatus(s) { statusEl.textContent = s; }
+
+const stageEl = document.getElementById("stage");
+const canvas = document.getElementById("gl");
+const overlay = document.getElementById("overlay");
+const msgEl = document.getElementById("msg");
+
+function showMessage(html) {
+  canvas.hidden = true;
+  overlay.hidden = true;
+  msgEl.hidden = false;
+  msgEl.innerHTML = html;
+  setStatus("unavailable");
+}
+
+async function main() {
+  if (!("gpu" in navigator)) {
+    showMessage("This experiment needs <b>WebGPU</b>, which your browser doesn't expose. Try a recent desktop Chrome or Edge, or Safari Technology Preview with WebGPU enabled.");
+    return;
+  }
+
+  let adapter, device;
+  try {
+    adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) throw new Error("no adapter");
+    device = await adapter.requestDevice();
+  } catch (err) {
+    showMessage("WebGPU is present but couldn't start (" + (err && err.message ? err.message : "unknown error") + "). Try updating your graphics drivers or using a recent desktop Chrome/Edge.");
+    return;
+  }
+
+  device.addEventListener("uncapturederror", (ev) => {
+    console.error("WebGPU uncaptured error:", ev.error.message);
+  });
+  device.lost.then((info) => {
+    console.error("WebGPU device lost:", info.message);
+  });
+
+  const context = canvas.getContext("webgpu");
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  context.configure({ device, format, alphaMode: "opaque" });
+
+  // ---------------------------------------------------------------------
+  // Load the portrait, sample it onto a GRID x GRID grid (CPU side).
+  // ---------------------------------------------------------------------
+  async function loadBitmap() {
+    for (const src of IMAGE_CANDIDATES) {
+      try {
+        const resp = await fetch(src);
+        if (!resp.ok) continue;
+        const blob = await resp.blob();
+        return await createImageBitmap(blob);
+      } catch (e) { /* try next candidate */ }
+    }
+    throw new Error("portrait image failed to load");
+  }
+  const bitmap = await loadBitmap();
+
+  const off = document.createElement("canvas");
+  off.width = GRID;
+  off.height = GRID;
+  const octx = off.getContext("2d");
+  octx.imageSmoothingEnabled = true;
+  octx.imageSmoothingQuality = "high";
+  octx.drawImage(bitmap, 0, 0, GRID, GRID);
+  const pixels = octx.getImageData(0, 0, GRID, GRID).data;
+
+  const homeData = new Float32Array(PARTICLE_COUNT * 2);
+  const stateData = new Float32Array(PARTICLE_COUNT * 4); // pos.xy, vel.xy
+  const colorData = new Uint32Array(PARTICLE_COUNT);
+
+  // sub-pixel jitter on each grain's home position: a perfectly regular
+  // GRID x GRID lattice beats against the screen's pixel grid and shows up
+  // as moire/scanline banding at rest. Jittering by less than one grid
+  // spacing breaks that regularity while the portrait stays sharp.
+  const cell = 1 / (GRID - 1);
+  for (let row = 0; row < GRID; row++) {
+    for (let col = 0; col < GRID; col++) {
+      const gi = row * GRID + col;
+      const pi = gi * 4;
+      const hx = col / (GRID - 1) + (Math.random() - 0.5) * cell * 0.85;
+      const hy = row / (GRID - 1) + (Math.random() - 0.5) * cell * 0.85;
+      homeData[gi * 2] = hx;
+      homeData[gi * 2 + 1] = hy;
+      stateData[gi * 4] = hx;
+      stateData[gi * 4 + 1] = hy;
+      stateData[gi * 4 + 2] = 0;
+      stateData[gi * 4 + 3] = 0;
+      const r = pixels[pi], g = pixels[pi + 1], b = pixels[pi + 2];
+      colorData[gi] = (r | (g << 8) | (b << 16) | (255 << 24)) >>> 0;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // GPU buffers
+  // ---------------------------------------------------------------------
+  const stateBuffer = device.createBuffer({
+    size: stateData.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(stateBuffer, 0, stateData);
+
+  const homeBuffer = device.createBuffer({
+    size: homeData.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(homeBuffer, 0, homeData);
+
+  const colorBuffer = device.createBuffer({
+    size: colorData.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(colorBuffer, 0, colorData);
+
+  // Params: time, dt, modeCurN, modeCurM, modeNextN, modeNextM, blend,
+  //         amplitude, kick, idleShimmer, pad0, pad1  (12 f32 = 48 bytes)
+  const PARAMS_FLOATS = 12;
+  const paramsBuffer = device.createBuffer({
+    size: PARAMS_FLOATS * 4,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const paramsData = new Float32Array(PARAMS_FLOATS);
+
+  // RenderParams: pointSize, pad x3 (16 bytes)
+  const renderParamsBuffer = device.createBuffer({
+    size: 16,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const renderParamsData = new Float32Array(4);
+
+  // ---------------------------------------------------------------------
+  // Compute pipeline: per-particle Chladni physics, no cross-particle
+  // reads needed, so a single buffer is updated in place.
+  // ---------------------------------------------------------------------
+  const computeModule = device.createShaderModule({
+    label: "cymatics-compute",
+    code: `
+      struct Particle { pos: vec2f, vel: vec2f };
+      struct Params {
+        time: f32, dt: f32,
+        modeCurN: f32, modeCurM: f32,
+        modeNextN: f32, modeNextM: f32,
+        blend: f32,
+        amplitude: f32,
+        kick: f32,
+        idleShimmer: f32,
+        pad0: f32, pad1: f32,
+      };
+
+      @group(0) @binding(0) var<storage, read_write> stateBuf: array<Particle>;
+      @group(0) @binding(1) var<storage, read> homeBuf: array<vec2f>;
+      @group(0) @binding(2) var<uniform> P: Params;
+
+      fn hash21(p: vec2f) -> f32 {
+        var p3 = fract(vec3f(p.x, p.y, p.x) * 0.1031);
+        p3 = p3 + dot(p3, p3.yzx + 33.33);
+        return fract((p3.x + p3.y) * p3.z);
+      }
+
+      const PI: f32 = 3.14159265358979;
+
+      fn chladniF(pos: vec2f, n: f32, m: f32) -> f32 {
+        return cos(n * PI * pos.x) * cos(m * PI * pos.y) - cos(m * PI * pos.x) * cos(n * PI * pos.y);
+      }
+      fn chladniGrad(pos: vec2f, n: f32, m: f32) -> vec2f {
+        let dfdx = -n * PI * sin(n * PI * pos.x) * cos(m * PI * pos.y)
+                   + m * PI * sin(m * PI * pos.x) * cos(n * PI * pos.y);
+        let dfdy = -m * PI * cos(n * PI * pos.x) * sin(m * PI * pos.y)
+                   + n * PI * cos(m * PI * pos.x) * sin(n * PI * pos.y);
+        return vec2f(dfdx, dfdy);
+      }
+
+      @compute @workgroup_size(64)
+      fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+        let idx = gid.x;
+        if (idx >= arrayLength(&stateBuf)) { return; }
+
+        var particle = stateBuf[idx];
+        let home = homeBuf[idx];
+        let pos = particle.pos;
+
+        let fA = chladniF(pos, P.modeCurN, P.modeCurM);
+        let fB = chladniF(pos, P.modeNextN, P.modeNextM);
+        let f = mix(fA, fB, P.blend);
+
+        let gA = chladniGrad(pos, P.modeCurN, P.modeCurM);
+        let gB = chladniGrad(pos, P.modeNextN, P.modeNextM);
+        var grad = mix(gA, gB, P.blend);
+        let glen = length(grad);
+        if (glen > 1e-4) { grad = grad / glen; } else { grad = vec2f(0.0, 0.0); }
+
+        let driven = clamp(P.amplitude, 0.0, 1.0);
+        let homeWeight = mix(1.0, 0.05, driven);
+        let nodalWeight = driven;
+
+        let farFromNode = clamp(abs(f) * 1.6, 0.0, 1.0);
+        let n1 = hash21(pos * 311.7 + vec2f(P.time * 1.7, f32(idx) * 0.0001));
+        let n2 = hash21(pos * 411.3 + vec2f(f32(idx) * 0.0001, P.time * 2.3));
+        let jitterDir = vec2f(n1 - 0.5, n2 - 0.5) * 2.0;
+        let jitterMag = nodalWeight * (0.25 + 0.75 * farFromNode) + P.kick + P.idleShimmer;
+
+        let springForce = (home - pos) * 46.0 * homeWeight;
+        let nodalForce = -sign(f) * grad * nodalWeight * 7.5;
+        let jitterForce = jitterDir * jitterMag * 9.0;
+
+        var vel = particle.vel;
+        let accel = springForce + nodalForce + jitterForce - vel * 7.0;
+        vel = vel + accel * P.dt;
+        vel = clamp(vel, vec2f(-6.0), vec2f(6.0));
+        var newPos = pos + vel * P.dt;
+        newPos = clamp(newPos, vec2f(0.0), vec2f(1.0));
+
+        stateBuf[idx] = Particle(newPos, vel);
+      }
+    `,
+  });
+
+  const computePipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: computeModule, entryPoint: "main" },
+  });
+  const computeBindGroup = device.createBindGroup({
+    layout: computePipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: stateBuffer } },
+      { binding: 1, resource: { buffer: homeBuffer } },
+      { binding: 2, resource: { buffer: paramsBuffer } },
+    ],
+  });
+
+  // ---------------------------------------------------------------------
+  // Render pipeline: vertex-pulled instanced quads, one per particle.
+  // ---------------------------------------------------------------------
+  const renderModule = device.createShaderModule({
+    label: "cymatics-render",
+    code: `
+      struct Particle { pos: vec2f, vel: vec2f };
+      struct RenderParams { pointSize: f32, pad0: f32, pad1: f32, pad2: f32 };
+
+      @group(0) @binding(0) var<storage, read> stateBuf: array<Particle>;
+      @group(0) @binding(1) var<storage, read> colorBuf: array<u32>;
+      @group(0) @binding(2) var<uniform> R: RenderParams;
+
+      struct VSOut {
+        @builtin(position) pos: vec4f,
+        @location(0) uv: vec2f,
+        @location(1) color: vec4f,
+      };
+
+      const QUAD = array<vec2f, 6>(
+        vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
+        vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
+      );
+
+      @vertex
+      fn vs(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> VSOut {
+        let p = stateBuf[iid].pos;
+        let corner = QUAD[vid];
+        let centerNDC = vec2f(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0);
+        var out: VSOut;
+        out.pos = vec4f(centerNDC + corner * R.pointSize, 0.0, 1.0);
+        out.uv = corner;
+        out.color = unpack4x8unorm(colorBuf[iid]);
+        return out;
+      }
+
+      @fragment
+      fn fs(in: VSOut) -> @location(0) vec4f {
+        let r2 = dot(in.uv, in.uv);
+        if (r2 > 1.0) { discard; }
+        let alpha = smoothstep(1.0, 0.2, r2);
+        return vec4f(in.color.rgb, alpha);
+      }
+    `,
+  });
+
+  const renderPipeline = device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: renderModule, entryPoint: "vs" },
+    fragment: {
+      module: renderModule,
+      entryPoint: "fs",
+      targets: [{
+        format,
+        blend: {
+          color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+          alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+        },
+      }],
+    },
+    primitive: { topology: "triangle-list" },
+  });
+  const renderBindGroup = device.createBindGroup({
+    layout: renderPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: stateBuffer } },
+      { binding: 1, resource: { buffer: colorBuffer } },
+      { binding: 2, resource: { buffer: renderParamsBuffer } },
+    ],
+  });
+
+  // ---------------------------------------------------------------------
+  // Canvas sizing
+  // ---------------------------------------------------------------------
+  let pointSizeNDC = 0.004;
+  const stageWrapEl = document.querySelector(".stage-wrap");
+
+  function sizeStage() {
+    // force the plate to be exactly square, sized to fit inside whatever
+    // space the flex layout leaves (which is not itself square), instead
+    // of relying on CSS aspect-ratio with two percentage dimensions.
+    const wrapRect = stageWrapEl.getBoundingClientRect();
+    const availW = wrapRect.width - 32;  // account for stage-wrap padding
+    const availH = wrapRect.height - 64;
+    const side = Math.max(50, Math.floor(Math.min(availW, availH)));
+    stageEl.style.width = side + "px";
+    stageEl.style.height = side + "px";
+  }
+
+  function resize() {
+    sizeStage();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = canvas.getBoundingClientRect();
+    const w = Math.max(1, Math.round(rect.width * dpr));
+    const h = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    const pointSizePx = Math.max(1.3, (canvas.width / (GRID - 1)) * 1.55);
+    pointSizeNDC = pointSizePx / canvas.width;
+  }
+  window.addEventListener("resize", resize);
+  const ro = new ResizeObserver(resize);
+  ro.observe(stageWrapEl);
+  resize();
+
+  // ---------------------------------------------------------------------
+  // Audio graph
+  // ---------------------------------------------------------------------
+  const audioEl = document.createElement("audio");
+  audioEl.loop = true;
+  audioEl.preload = "auto";
+  audioEl.crossOrigin = "anonymous";
+
+  let audioCtx = null, analyser = null, mediaSource = null, freqData = null;
+  let isPlaying = false;
+  let currentTrack = 0;
+
+  function ensureGraph() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.5;
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    mediaSource = audioCtx.createMediaElementSource(audioEl);
+    mediaSource.connect(analyser);
+    analyser.connect(audioCtx.destination);
+  }
+
+  function trackUrl(baseIndex, file) { return AUDIO_BASES[baseIndex] + file + ".mp3"; }
+
+  function setTrack(index, autoplay) {
+    currentTrack = index;
+    const file = TRACKS[index].file;
+    let baseIndex = 0;
+    audioEl.src = trackUrl(baseIndex, file);
+    const onErr2 = () => setStatus("track failed to load: " + file);
+    const onErr = () => {
+      baseIndex++;
+      if (baseIndex < AUDIO_BASES.length) {
+        audioEl.removeEventListener("error", onErr);
+        audioEl.src = trackUrl(baseIndex, file);
+        audioEl.addEventListener("error", onErr2, { once: true });
+        if (autoplay) audioEl.play().catch(() => {});
+      } else {
+        setStatus("track failed to load: " + file);
+      }
+    };
+    audioEl.addEventListener("error", onErr, { once: true });
+    audioEl.load();
+    if (autoplay) audioEl.play().catch(() => {});
+    updateTrackButtons();
+  }
+
+  function play() {
+    ensureGraph();
+    if (!audioEl.src) setTrack(currentTrack, false);
+    audioCtx.resume();
+    audioEl.play().then(() => {
+      isPlaying = true;
+      setStatus("playing — " + TRACKS[currentTrack].label);
+    }).catch((err) => setStatus("playback blocked: " + err.message));
+  }
+  function pause() {
+    audioEl.pause();
+    isPlaying = false;
+    setStatus("paused");
+  }
+  function togglePlay() { if (isPlaying) pause(); else play(); }
+
+  let started = false;
+  function startFromOverlay() {
+    if (started) return;
+    started = true;
+    overlay.classList.add("hidden");
+    play();
+  }
+  overlay.addEventListener("click", startFromOverlay);
+  canvas.addEventListener("click", () => {
+    if (!started) { startFromOverlay(); return; }
+    togglePlay();
+  });
+
+  const tracksEl = document.getElementById("tracks");
+  const trackButtons = [];
+  TRACKS.forEach((t, i) => {
+    const btn = document.createElement("button");
+    btn.className = "track-btn";
+    btn.type = "button";
+    btn.textContent = t.label;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      ensureGraph();
+      setTrack(i, true);
+      if (!started) { started = true; overlay.classList.add("hidden"); }
+      audioCtx.resume();
+      audioEl.play().then(() => {
+        isPlaying = true;
+        setStatus("playing — " + TRACKS[i].label);
+      }).catch((err) => setStatus("playback blocked: " + err.message));
+    });
+    tracksEl.appendChild(btn);
+    trackButtons.push(btn);
+  });
+  function updateTrackButtons() {
+    trackButtons.forEach((b, i) => b.classList.toggle("active", i === currentTrack));
+  }
+  updateTrackButtons();
+  setTrack(0, false);
+
+  // ---------------------------------------------------------------------
+  // Audio analysis -> physics parameters, with adaptive gain control so
+  // quiet / sparse tracks still drive clear figures.
+  // ---------------------------------------------------------------------
+  const NUM_BANDS = MODES.length;
+  const bandRunningMax = new Array(NUM_BANDS).fill(0.05);
+  const BAND_FLOOR = 0.035;
+  const BAND_MAX_DECAY = 0.996; // per-frame decay of the running max (~60fps)
+
+  let loudRunningMax = 0.04;
+  const LOUD_FLOOR = 0.025;
+  const LOUD_MAX_DECAY = 0.995;
+
+  let loudnessEnv = 0;      // slow follower, for onset / flux detection
+  let amplitude = 0;        // smoothed, AGC-normalised loudness -> vibration strength
+  let kick = 0;              // onset impulse, decays quickly
+  let onsetCooldown = 0;
+
+  let modeCurIdx = 0, modeNextIdx = 0, blend = 1;
+  const CROSSFADE_SECONDS = 1.3;
+  const DOMINANT_GATE = 0.10; // ignore mode switches while effectively silent
+
+  function follow(prev, target, kUp, kDown) {
+    const k = target > prev ? kUp : kDown;
+    return prev + (target - prev) * k;
+  }
+
+  function updateAudio(dt) {
+    if (!analyser) {
+      amplitude = follow(amplitude, 0, 0.1, 0.06);
+      kick *= Math.exp(-6.0 * dt);
+      return;
+    }
+    analyser.getByteFrequencyData(freqData);
+    const sampleRate = audioCtx.sampleRate;
+    const binHz = sampleRate / 2 / freqData.length;
+
+    // band energies (0..1) from byte FFT data
+    const bandRaw = new Array(NUM_BANDS);
+    for (let b = 0; b < NUM_BANDS; b++) {
+      const loBin = Math.max(0, Math.floor(BAND_EDGES[b] / binHz));
+      const hiBin = Math.min(freqData.length - 1, Math.ceil(BAND_EDGES[b + 1] / binHz));
+      let sum = 0, n = 0;
+      for (let i = loBin; i <= hiBin; i++) { sum += freqData[i]; n++; }
+      bandRaw[b] = (n ? sum / n : 0) / 255;
+    }
+
+    let overallSum = 0;
+    for (let i = 0; i < freqData.length; i++) overallSum += freqData[i];
+    const loudRaw = (overallSum / freqData.length) / 255;
+
+    // adaptive gain: running max with slow decay and a floor
+    const normBand = new Array(NUM_BANDS);
+    for (let b = 0; b < NUM_BANDS; b++) {
+      bandRunningMax[b] = Math.max(bandRunningMax[b] * BAND_MAX_DECAY, bandRaw[b], BAND_FLOOR);
+      normBand[b] = Math.min(1.2, bandRaw[b] / bandRunningMax[b]);
+    }
+    loudRunningMax = Math.max(loudRunningMax * LOUD_MAX_DECAY, loudRaw, LOUD_FLOOR);
+    const loudNorm = Math.min(1.2, loudRaw / loudRunningMax);
+
+    amplitude = follow(amplitude, Math.min(1, loudNorm), 0.3, 0.05);
+
+    // onset detection via spectral-flux-like loudness jump
+    loudnessEnv = follow(loudnessEnv, loudNorm, 0.04, 0.02);
+    onsetCooldown = Math.max(0, onsetCooldown - dt);
+    const flux = loudNorm - loudnessEnv;
+    if (flux > 0.22 && loudNorm > 0.3 && onsetCooldown <= 0) {
+      kick = 1.0;
+      onsetCooldown = 0.18;
+    }
+    kick *= Math.exp(-6.0 * dt);
+
+    // dominant band -> target Chladni mode, gated so silence doesn't flap modes
+    if (loudNorm > DOMINANT_GATE) {
+      let best = 0, bestV = -1;
+      for (let b = 0; b < NUM_BANDS; b++) {
+        if (normBand[b] > bestV) { bestV = normBand[b]; best = b; }
+      }
+      if (best !== modeNextIdx) {
+        modeCurIdx = modeNextIdx;
+        modeNextIdx = best;
+        blend = 0;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Main loop
+  // ---------------------------------------------------------------------
+  let lastTime = performance.now();
+  const startTime = lastTime;
+
+  function frame(now) {
+    const t = (now - startTime) / 1000;
+    const dt = Math.min((now - lastTime) / 1000, 1 / 30);
+    lastTime = now;
+
+    updateAudio(dt);
+    blend = Math.min(1, blend + dt / CROSSFADE_SECONDS);
+
+    const idleShimmer = 0.012 * (0.5 + 0.5 * Math.sin(t * 0.35));
+
+    paramsData[0] = t;
+    paramsData[1] = dt;
+    paramsData[2] = MODES[modeCurIdx][0];
+    paramsData[3] = MODES[modeCurIdx][1];
+    paramsData[4] = MODES[modeNextIdx][0];
+    paramsData[5] = MODES[modeNextIdx][1];
+    paramsData[6] = blend;
+    paramsData[7] = amplitude;
+    paramsData[8] = kick;
+    paramsData[9] = idleShimmer;
+    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    renderParamsData[0] = pointSizeNDC;
+    device.queue.writeBuffer(renderParamsBuffer, 0, renderParamsData);
+
+    const encoder = device.createCommandEncoder();
+
+    const computePass = encoder.beginComputePass();
+    computePass.setPipeline(computePipeline);
+    computePass.setBindGroup(0, computeBindGroup);
+    computePass.dispatchWorkgroups(Math.ceil(PARTICLE_COUNT / 64));
+    computePass.end();
+
+    const renderPass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: context.getCurrentTexture().createView(),
+        clearValue: { r: 0.02, g: 0.025, b: 0.035, a: 1 },
+        loadOp: "clear",
+        storeOp: "store",
+      }],
+    });
+    renderPass.setPipeline(renderPipeline);
+    renderPass.setBindGroup(0, renderBindGroup);
+    renderPass.draw(6, PARTICLE_COUNT);
+    renderPass.end();
+
+    device.queue.submit([encoder.finish()]);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // Debug hooks for automated verification.
+  window.__cymatics = {
+    isPlaying: () => isPlaying,
+    currentTrack: () => TRACKS[currentTrack].label,
+    getAmplitude: () => amplitude,
+    getKick: () => kick,
+    getMode: () => ({ cur: MODES[modeCurIdx], next: MODES[modeNextIdx], blend }),
+    getFreqSum: () => {
+      if (!freqData) return 0;
+      let s = 0;
+      for (let i = 0; i < freqData.length; i++) s += freqData[i];
+      return s;
+    },
+  };
+}
+
+main().catch((err) => {
+  console.error(err);
+  showMessage("Something went wrong starting this experiment: " + (err && err.message ? err.message : err));
+});
+</script>
+</body>
+</html>

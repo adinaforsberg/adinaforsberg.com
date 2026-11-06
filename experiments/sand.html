@@ -1,0 +1,1112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Sand — falling-sand portrait</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #0b0b0c;
+    color: #eee;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  a.back-link {
+    position: fixed;
+    top: 18px;
+    left: 20px;
+    color: #9a9a9a;
+    text-decoration: none;
+    font-size: 13px;
+    letter-spacing: .02em;
+    border: 1px solid #2a2a2e;
+    padding: 6px 12px;
+    border-radius: 2px;
+    transition: border-color .2s, color .2s, background .2s;
+    z-index: 10;
+  }
+  a.back-link:hover {
+    color: #eee;
+    border-color: #8a8a90;
+    background: #141416;
+  }
+  .stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  #glcanvas {
+    display: block;
+    touch-action: none;
+    cursor: crosshair;
+    background: #0b0b0c;
+    box-shadow: 0 0 0 1px #2a2a2e;
+  }
+  .caption {
+    margin: 0;
+    font-size: 12.5px;
+    letter-spacing: .03em;
+    color: #8a8a90;
+    text-align: center;
+    user-select: none;
+  }
+  .caption strong {
+    color: #b5b5b5;
+    font-weight: 600;
+  }
+  .controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .controls button {
+    font-family: inherit;
+    font-size: 12.5px;
+    letter-spacing: .03em;
+    color: #d8d8da;
+    background: #141416;
+    border: 1px solid #2a2a2e;
+    padding: 7px 14px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: border-color .2s, background .2s, color .2s, opacity .2s;
+  }
+  .controls button:hover:not(:disabled) {
+    border-color: #8a8a90;
+    background: #1b1b1e;
+  }
+  .controls button:disabled {
+    opacity: .35;
+    cursor: default;
+  }
+  .fallback {
+    max-width: 30rem;
+    text-align: center;
+    color: #b5b5b5;
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 0 20px;
+  }
+</style>
+</head>
+<body>
+  <a class="back-link" href="/experiments/">&larr; experiments</a>
+  <div class="stage">
+    <canvas id="glcanvas"></canvas>
+    <div class="controls">
+      <button id="btnFall">Let it fall</button>
+      <button id="btnRebuild">Rebuild</button>
+    </div>
+    <p class="caption"><strong>Falling-sand portrait</strong> — click/“Let it fall” to release gravity · drag to push the sand · R to rebuild</p>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("glcanvas");
+  var btnFall = document.getElementById("btnFall");
+  var btnRebuild = document.getElementById("btnRebuild");
+  var gl = canvas.getContext("webgl2", { antialias: false, preserveDrawingBuffer: false, alpha: false });
+
+  if (!gl) {
+    var stage = document.querySelector(".stage");
+    stage.innerHTML = '<p class="fallback">WebGL2 is not available in this browser, so the sand simulation cannot run here.</p>';
+    return;
+  }
+
+  // -----------------------------------------------------------------------
+  // Tunables
+  // -----------------------------------------------------------------------
+
+  var TARGET_CELLS = 260000;
+  var SUBSTEPS_PER_FRAME = 8;
+  var STICKINESS = 0.12;
+  var RELEASE_SPAN = 1.3;      // seconds for the bottom-up crumble wave
+  var REBUILD_DURATION = 1.5;  // seconds for the fly-back animation
+  var PADDLE_SPEED = 0.55;     // rad/s
+
+  // -----------------------------------------------------------------------
+  // Shared GLSL: obstacle field (music staff, Galton pegs, funnel, paddle)
+  // -----------------------------------------------------------------------
+
+  var OBSTACLE_GLSL = "\n" +
+    "float sdSeg(vec2 p, vec2 a, vec2 b) {\n" +
+    "  vec2 pa = p - a, ba = b - a;\n" +
+    "  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);\n" +
+    "  return length(pa - ba * h);\n" +
+    "}\n" +
+    "float coverCapsule(vec2 p, vec2 a, vec2 b, float halfT, float aa) {\n" +
+    "  float d = sdSeg(p, a, b) - halfT;\n" +
+    "  return 1.0 - smoothstep(-aa, aa, d);\n" +
+    "}\n" +
+    "float coverCircle(vec2 p, vec2 c, float r, float aa) {\n" +
+    "  float d = length(p - c) - r;\n" +
+    "  return 1.0 - smoothstep(-aa, aa, d);\n" +
+    "}\n" +
+    "float obstacleField(vec2 p, vec2 g, float t, float portraitBottom, float portraitN,\n" +
+    "                     float ptrActive, vec2 ptrCell, float ptrRadius) {\n" +
+    "  float gw = g.x, gh = g.y;\n" +
+    "  float aa = max(0.6, gh * 0.0012);\n" +
+    "  float cov = 0.0;\n" +
+    "  float floorY = gh * 0.975;\n" +
+    "  cov = max(cov, smoothstep(floorY - aa*2.0, floorY + aa*2.0, p.y));\n" +
+    "  float wallW = max(2.0, gh * 0.012);\n" +
+    "  cov = max(cov, 1.0 - smoothstep(wallW - aa*2.0, wallW + aa*2.0, p.x));\n" +
+    "  cov = max(cov, 1.0 - smoothstep(wallW - aa*2.0, wallW + aa*2.0, gw - p.x));\n" +
+    "  float staffSpacing = 0.009 * gh;\n" +
+    "  float staffHalfT = max(0.7, gh * 0.0022);\n" +
+    "  float staffRun = 0.08 * gh;\n" +
+    "  float staffAngle = 0.262;\n" + // ~15 degrees
+    "  float staffDrop = staffRun * tan(staffAngle);\n" +
+    "  float gapHalf = 0.20 * portraitN;\n" +
+    "  float leftInnerX = 0.5*gw - gapHalf;\n" +
+    "  float leftOuterX = max(0.04 * gw, leftInnerX - staffRun);\n" +
+    "  float rightInnerX = 0.5*gw + gapHalf;\n" +
+    "  float rightOuterX = min(0.96 * gw, rightInnerX + staffRun);\n" +
+    "  float staffTop = portraitBottom * gh + 0.008 * gh;\n" +
+    "  for (int i = 0; i < 4; i++) {\n" +
+    "    float yHigh = staffTop + float(i) * staffSpacing;\n" +
+    "    float yLow = yHigh + staffDrop;\n" +
+    "    cov = max(cov, coverCapsule(p, vec2(leftInnerX, yHigh), vec2(leftOuterX, yLow), staffHalfT, aa));\n" +
+    "    cov = max(cov, coverCapsule(p, vec2(rightInnerX, yHigh), vec2(rightOuterX, yLow), staffHalfT, aa));\n" +
+    "  }\n" +
+    "  float staffLowestY = staffTop + 3.0 * staffSpacing + staffDrop;\n" +
+    "  float noteR = max(1.8, gh * 0.009);\n" +
+    "  cov = max(cov, coverCircle(p, mix(vec2(leftInnerX, staffTop + 1.0*staffSpacing), vec2(leftOuterX, staffTop + 1.0*staffSpacing + staffDrop), 0.55) - vec2(0.0, noteR*0.9), noteR, aa));\n" +
+    "  cov = max(cov, coverCircle(p, mix(vec2(leftInnerX, staffTop + 2.5*staffSpacing), vec2(leftOuterX, staffTop + 2.5*staffSpacing + staffDrop), 0.3) - vec2(0.0, noteR*0.9), noteR, aa));\n" +
+    "  cov = max(cov, coverCircle(p, mix(vec2(rightInnerX, staffTop + 0.5*staffSpacing), vec2(rightOuterX, staffTop + 0.5*staffSpacing + staffDrop), 0.4) - vec2(0.0, noteR*0.9), noteR, aa));\n" +
+    "  cov = max(cov, coverCircle(p, mix(vec2(rightInnerX, staffTop + 2.0*staffSpacing), vec2(rightOuterX, staffTop + 2.0*staffSpacing + staffDrop), 0.6) - vec2(0.0, noteR*0.9), noteR, aa));\n" +
+    "  float galtonTop = staffLowestY + 0.008 * gh;\n" +
+    "  float rowSp = 0.016 * gh;\n" +
+    "  float colSp = 0.046 * gh;\n" +
+    "  float pegR = max(1.0, gh * 0.0022);\n" +
+    "  float galtonXc = 0.5 * gw;\n" +
+    "  for (int row = 0; row < 2; row++) {\n" +
+    "    float ry = galtonTop + float(row) * rowSp;\n" +
+    "    bool odd = (row - (row/2)*2) == 1;\n" +
+    "    float offset = odd ? colSp * 0.5 : 0.0;\n" +
+    "    for (int col = -7; col <= 7; col++) {\n" +
+    "      float cx = galtonXc + float(col) * colSp + offset;\n" +
+    "      cov = max(cov, coverCircle(p, vec2(cx, ry), pegR, aa));\n" +
+    "    }\n" +
+    "  }\n" +
+    "  float galtonBottom = galtonTop + 1.0 * rowSp;\n" +
+    "  float funnelTop = galtonBottom + 0.008 * gh;\n" +
+    "  float funnelRun = 0.05 * gh;\n" +
+    "  float funnelAngle = 0.785;\n" + // ~45 degrees
+    "  float funnelDrop = funnelRun * tan(funnelAngle);\n" +
+    "  float funnelGapHalf = 0.045 * gh;\n" +
+    "  float funnelHalfT = max(0.8, gh * 0.0026);\n" +
+    "  float fLeftTopX = galtonXc - funnelGapHalf - funnelRun;\n" +
+    "  float fLeftBotX = galtonXc - funnelGapHalf;\n" +
+    "  float fRightTopX = galtonXc + funnelGapHalf + funnelRun;\n" +
+    "  float fRightBotX = galtonXc + funnelGapHalf;\n" +
+    "  float funnelBottom = funnelTop + funnelDrop;\n" +
+    "  cov = max(cov, coverCapsule(p, vec2(fLeftTopX, funnelTop), vec2(fLeftBotX, funnelBottom), funnelHalfT, aa));\n" +
+    "  cov = max(cov, coverCapsule(p, vec2(fRightTopX, funnelTop), vec2(fRightBotX, funnelBottom), funnelHalfT, aa));\n" +
+    "  float halfLen = 0.26 * gh;\n" +
+    "  float pivotY = funnelBottom + 0.008 * gh;\n" +
+    "  vec2 pivot = vec2(galtonXc, pivotY);\n" +
+    "  float ang = t * " + PADDLE_SPEED.toFixed(3) + ";\n" +
+    "  vec2 dir = vec2(cos(ang), sin(ang));\n" +
+    "  float paddleHalfT = max(1.1, gh * 0.0045);\n" +
+    "  cov = max(cov, coverCapsule(p, pivot - dir*halfLen, pivot + dir*halfLen, paddleHalfT, aa));\n" +
+    "  if (ptrActive > 0.5) {\n" +
+    "    cov = max(cov, coverCircle(p, ptrCell, ptrRadius, aa*1.5));\n" +
+    "  }\n" +
+    "  return clamp(cov, 0.0, 1.0);\n" +
+    "}\n";
+
+  var PACK_GLSL =
+    "vec2 packU16(float v) {\n" +
+    "  v = clamp(v, 0.0, 65535.0);\n" +
+    "  float hi = floor(v / 256.0);\n" +
+    "  float lo = v - hi * 256.0;\n" +
+    "  return vec2(hi, lo) / 255.0;\n" +
+    "}\n" +
+    "float unpackU16(vec2 b) {\n" +
+    "  return floor(b.x * 255.0 + 0.5) * 256.0 + floor(b.y * 255.0 + 0.5);\n" +
+    "}\n";
+
+  // -----------------------------------------------------------------------
+  // Vertex shaders
+  // -----------------------------------------------------------------------
+
+  var VS_PLAIN =
+    "#version 300 es\n" +
+    "in vec2 aPos;\n" +
+    "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+
+  var VS_SCREEN =
+    "#version 300 es\n" +
+    "in vec2 aPos;\n" +
+    "out vec2 vUv;\n" +
+    "void main() {\n" +
+    "  vUv = vec2((aPos.x + 1.0) * 0.5, 1.0 - (aPos.y + 1.0) * 0.5);\n" +
+    "  gl_Position = vec4(aPos, 0.0, 1.0);\n" +
+    "}\n";
+
+  // -----------------------------------------------------------------------
+  // Obstacle raster pass (grid resolution)
+  // -----------------------------------------------------------------------
+
+  var FS_OBSTACLE =
+    "#version 300 es\n" +
+    "precision highp float;\n" +
+    "out vec4 outColor;\n" +
+    "uniform vec2 uGridSizeF;\n" +
+    "uniform float uTime;\n" +
+    "uniform float uPortraitBottom;\n" +
+    "uniform float uPortraitN;\n" +
+    "uniform float uPointerActive;\n" +
+    "uniform vec2 uPointerCell;\n" +
+    "uniform float uPointerRadius;\n" +
+    OBSTACLE_GLSL +
+    "void main() {\n" +
+    "  vec2 p = gl_FragCoord.xy;\n" +
+    "  float cov = obstacleField(p, uGridSizeF, uTime, uPortraitBottom, uPortraitN, uPointerActive, uPointerCell, uPointerRadius);\n" +
+    "  float m = cov > 0.5 ? 1.0 : 0.0;\n" +
+    "  outColor = vec4(m, m, m, 1.0);\n" +
+    "}\n";
+
+  // -----------------------------------------------------------------------
+  // CA step (Margolus-style 2x2 block gather, grid resolution, MRT)
+  // -----------------------------------------------------------------------
+
+  var FS_CASTEP =
+    "#version 300 es\n" +
+    "precision highp float;\n" +
+    "layout(location=0) out vec4 outColor;\n" +
+    "layout(location=1) out vec4 outHome;\n" +
+    "layout(location=2) out vec4 outStill;\n" +
+    "uniform sampler2D uColorTex;\n" +
+    "uniform sampler2D uHomeTex;\n" +
+    "uniform sampler2D uStillTex;\n" +
+    "uniform sampler2D uObstacleTex;\n" +
+    "uniform ivec2 uGridSize;\n" +
+    "uniform int uParity;\n" +
+    "uniform int uStep;\n" +
+    "uniform float uStickiness;\n" +
+    "uniform float uFallActive;\n" +
+    "uniform float uFallElapsed;\n" +
+    "uniform float uReleaseSpan;\n" +
+    "uniform float uPortraitTopRow;\n" +
+    "uniform float uPortraitN;\n" +
+    PACK_GLSL +
+    "struct Cell { bool sand; bool obstacle; vec4 color; vec4 home; };\n" +
+    "Cell readCell(ivec2 c) {\n" +
+    "  Cell r;\n" +
+    "  if (c.x < 0 || c.y < 0 || c.x >= uGridSize.x || c.y >= uGridSize.y) {\n" +
+    "    r.sand = false; r.obstacle = true; r.color = vec4(0.0); r.home = vec4(0.0);\n" +
+    "    return r;\n" +
+    "  }\n" +
+    "  vec4 col = texelFetch(uColorTex, c, 0);\n" +
+    "  vec4 hm = texelFetch(uHomeTex, c, 0);\n" +
+    "  float ob = texelFetch(uObstacleTex, c, 0).r;\n" +
+    "  r.sand = col.a > 0.5;\n" +
+    "  r.obstacle = ob > 0.5;\n" +
+    "  r.color = col;\n" +
+    "  r.home = hm;\n" +
+    "  return r;\n" +
+    "}\n" +
+    "uint hash32(uint x) {\n" +
+    "  x ^= x >> 16u; x *= 0x7feb352du;\n" +
+    "  x ^= x >> 15u; x *= 0x846ca68bu;\n" +
+    "  x ^= x >> 16u;\n" +
+    "  return x;\n" +
+    "}\n" +
+    "float rand01(ivec2 cell, int seed, int salt) {\n" +
+    "  uint h = hash32(uint(cell.x) * 374761393u + uint(cell.y) * 668265263u + uint(seed) * 2246822519u + uint(salt) * 3266489917u);\n" +
+    "  return float(h & 0xFFFFu) / 65535.0;\n" +
+    "}\n" +
+    "bool isReleased(vec4 home) {\n" +
+    "  float homeRow = unpackU16(home.ba);\n" +
+    "  float frac = clamp((homeRow - uPortraitTopRow) / max(uPortraitN, 1.0), 0.0, 1.0);\n" +
+    "  float thresh = (1.0 - frac) * uReleaseSpan;\n" +
+    "  return uFallElapsed > thresh;\n" +
+    "}\n" +
+    "void main() {\n" +
+    "  ivec2 px = ivec2(gl_FragCoord.xy);\n" +
+    "  ivec2 origin = ivec2(floor((vec2(px) - vec2(float(uParity))) * 0.5)) * 2 + uParity;\n" +
+    "  ivec2 pA = origin;\n" +
+    "  ivec2 pB = origin + ivec2(1,0);\n" +
+    "  ivec2 pC = origin + ivec2(0,1);\n" +
+    "  ivec2 pD = origin + ivec2(1,1);\n" +
+    "  Cell A = readCell(pA); Cell B = readCell(pB); Cell Cc = readCell(pC); Cell D = readCell(pD);\n" +
+    "  bool occA = A.sand, occB = B.sand, occC = Cc.sand, occD = D.sand;\n" +
+    "  bool obA = A.obstacle, obB = B.obstacle, obC = Cc.obstacle, obD = D.obstacle;\n" +
+    "  vec4 colA = A.color, colB = B.color, colC = Cc.color, colD = D.color;\n" +
+    "  vec4 homA = A.home, homB = B.home, homC = Cc.home, homD = D.home;\n" +
+    "  float stillA = min(254.0, texelFetch(uStillTex, pA, 0).r * 255.0 + 1.0);\n" +
+    "  float stillB = min(254.0, texelFetch(uStillTex, pB, 0).r * 255.0 + 1.0);\n" +
+    "  float stillC = min(254.0, texelFetch(uStillTex, pC, 0).r * 255.0 + 1.0);\n" +
+    "  float stillD = min(254.0, texelFetch(uStillTex, pD, 0).r * 255.0 + 1.0);\n" +
+    "  bool claimedA = false, claimedB = false, claimedC = false, claimedD = false;\n" +
+    "  if (occA && obA) {\n" +
+    "    if (!occC && !obC && !claimedC) { occC=true; colC=colA; homC=homA; stillC=0.0; claimedC=true; occA=false; colA=vec4(0.0); homA=vec4(0.0); stillA=0.0; }\n" +
+    "    else if (!occD && !obD && !claimedD) { occD=true; colD=colA; homD=homA; stillD=0.0; claimedD=true; occA=false; colA=vec4(0.0); homA=vec4(0.0); stillA=0.0; }\n" +
+    "    else if (!occB && !obB && !claimedB) { occB=true; colB=colA; homB=homA; stillB=0.0; claimedB=true; occA=false; colA=vec4(0.0); homA=vec4(0.0); stillA=0.0; }\n" +
+    "  }\n" +
+    "  if (occB && obB) {\n" +
+    "    if (!occD && !obD && !claimedD) { occD=true; colD=colB; homD=homB; stillD=0.0; claimedD=true; occB=false; colB=vec4(0.0); homB=vec4(0.0); stillB=0.0; }\n" +
+    "    else if (!occC && !obC && !claimedC) { occC=true; colC=colB; homC=homB; stillC=0.0; claimedC=true; occB=false; colB=vec4(0.0); homB=vec4(0.0); stillB=0.0; }\n" +
+    "    else if (!occA && !obA && !claimedA) { occA=true; colA=colB; homA=homB; stillA=0.0; claimedA=true; occB=false; colB=vec4(0.0); homB=vec4(0.0); stillB=0.0; }\n" +
+    "  }\n" +
+    "  if (occC && obC) {\n" +
+    "    if (!occD && !obD && !claimedD) { occD=true; colD=colC; homD=homC; stillD=0.0; claimedD=true; occC=false; colC=vec4(0.0); homC=vec4(0.0); stillC=0.0; }\n" +
+    "    else if (!occA && !obA && !claimedA) { occA=true; colA=colC; homA=homC; stillA=0.0; claimedA=true; occC=false; colC=vec4(0.0); homC=vec4(0.0); stillC=0.0; }\n" +
+    "    else if (!occB && !obB && !claimedB) { occB=true; colB=colC; homB=homC; stillB=0.0; claimedB=true; occC=false; colC=vec4(0.0); homC=vec4(0.0); stillC=0.0; }\n" +
+    "  }\n" +
+    "  if (occD && obD) {\n" +
+    "    if (!occC && !obC && !claimedC) { occC=true; colC=colD; homC=homD; stillC=0.0; claimedC=true; occD=false; colD=vec4(0.0); homD=vec4(0.0); stillD=0.0; }\n" +
+    "    else if (!occB && !obB && !claimedB) { occB=true; colB=colD; homB=homD; stillB=0.0; claimedB=true; occD=false; colD=vec4(0.0); homD=vec4(0.0); stillD=0.0; }\n" +
+    "    else if (!occA && !obA && !claimedA) { occA=true; colA=colD; homA=homD; stillA=0.0; claimedA=true; occD=false; colD=vec4(0.0); homD=vec4(0.0); stillD=0.0; }\n" +
+    "  }\n" +
+    "  bool fallOn = uFallActive > 0.5;\n" +
+    "  bool wantA = fallOn && occA && !obA && isReleased(homA);\n" +
+    "  bool wantB = fallOn && occB && !obB && isReleased(homB);\n" +
+    "  bool availC = !occC && !obC && !claimedC;\n" +
+    "  bool availD = !occD && !obD && !claimedD;\n" +
+    "  int targetA = -1; int targetB = -1;\n" +
+    "  if (wantA) { if (availC) targetA = 2; else if (availD) targetA = 3; }\n" +
+    "  if (wantB) { if (availD) targetB = 3; else if (availC) targetB = 2; }\n" +
+    "  if (targetA != -1 && targetA == targetB) {\n" +
+    "    float r = rand01(origin, uStep, 0);\n" +
+    "    if (r < 0.5) targetB = -1; else targetA = -1;\n" +
+    "  }\n" +
+    "  if (targetA == 3 && rand01(origin, uStep, 1) < uStickiness) targetA = -1;\n" +
+    "  if (targetB == 2 && rand01(origin, uStep, 2) < uStickiness) targetB = -1;\n" +
+    "  bool preOccA = occA; bool preOccB = occB;\n" +
+    "  vec4 preColA = colA; vec4 preColB = colB;\n" +
+    "  vec4 preHomA = homA; vec4 preHomB = homB;\n" +
+    "  float slideProb = 0.9;\n" +
+    "  bool slideAfire = fallOn && targetA == -1 && preOccA && !obA && isReleased(preHomA) && !preOccB && !obB && !claimedB && (rand01(origin, uStep, 3) < slideProb);\n" +
+    "  bool slideBfire = fallOn && targetB == -1 && preOccB && !obB && isReleased(preHomB) && !preOccA && !obA && !claimedA && (rand01(origin, uStep, 4) < slideProb);\n" +
+    "  if (targetA == 2) { occC=true; colC=colA; homC=homA; stillC=0.0; occA=false; colA=vec4(0.0); homA=vec4(0.0); stillA=0.0; }\n" +
+    "  else if (targetA == 3) { occD=true; colD=colA; homD=homA; stillD=0.0; occA=false; colA=vec4(0.0); homA=vec4(0.0); stillA=0.0; }\n" +
+    "  if (targetB == 3) { occD=true; colD=colB; homD=homB; stillD=0.0; occB=false; colB=vec4(0.0); homB=vec4(0.0); stillB=0.0; }\n" +
+    "  else if (targetB == 2) { occC=true; colC=colB; homC=homB; stillC=0.0; occB=false; colB=vec4(0.0); homB=vec4(0.0); stillB=0.0; }\n" +
+    "  if (slideAfire) { occB=true; colB=preColA; homB=preHomA; stillB=0.0; occA=false; colA=vec4(0.0); homA=vec4(0.0); stillA=0.0; }\n" +
+    "  else if (slideBfire) { occA=true; colA=preColB; homA=preHomB; stillA=0.0; occB=false; colB=vec4(0.0); homB=vec4(0.0); stillB=0.0; }\n" +
+    "  ivec2 local = px - origin;\n" +
+    "  int idx = local.y * 2 + local.x;\n" +
+    "  vec4 outCol; vec4 outHm; float outSt;\n" +
+    "  if (idx == 0) { outCol = colA; outHm = homA; outSt = stillA; }\n" +
+    "  else if (idx == 1) { outCol = colB; outHm = homB; outSt = stillB; }\n" +
+    "  else if (idx == 2) { outCol = colC; outHm = homC; outSt = stillC; }\n" +
+    "  else { outCol = colD; outHm = homD; outSt = stillD; }\n" +
+    "  int pileCapRow = int(float(uGridSize.y) * 0.76);\n" +
+    "  if (fallOn && outCol.a > 0.5 && px.y < pileCapRow && outSt > 120.0) {\n" +
+    "    ivec2 capPos = ivec2(px.x, pileCapRow);\n" +
+    "    bool columnFull = texelFetch(uColorTex, capPos, 0).a > 0.5 || texelFetch(uObstacleTex, capPos, 0).r > 0.5;\n" +
+    "    if (columnFull && rand01(px, uStep, 7) < 0.2) { outCol = vec4(0.0); outHm = vec4(0.0); outSt = 0.0; }\n" +
+    "  }\n" +
+    "  if (outCol.a < 0.5) { outSt = 0.0; }\n" +
+    "  outColor = outCol;\n" +
+    "  outHome = outHm;\n" +
+    "  outStill = vec4(outSt / 255.0, 0.0, 0.0, 1.0);\n" +
+    "}\n";
+
+  // -----------------------------------------------------------------------
+  // Final render (canvas resolution)
+  // -----------------------------------------------------------------------
+
+  var FS_RENDER =
+    "#version 300 es\n" +
+    "precision highp float;\n" +
+    "in vec2 vUv;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uColorTex;\n" +
+    "uniform sampler2D uHomeTex;\n" +
+    "uniform ivec2 uGridSize;\n" +
+    "uniform vec2 uGridSizeF;\n" +
+    "uniform float uTime;\n" +
+    "uniform float uPortraitBottom;\n" +
+    "uniform float uPortraitN;\n" +
+    "uniform float uPointerActive;\n" +
+    "uniform vec2 uPointerCell;\n" +
+    "uniform float uPointerRadius;\n" +
+    "uniform float uOnlyObstacles;\n" +
+    OBSTACLE_GLSL +
+    "uint hash32(uint x) {\n" +
+    "  x ^= x >> 16u; x *= 0x7feb352du;\n" +
+    "  x ^= x >> 15u; x *= 0x846ca68bu;\n" +
+    "  x ^= x >> 16u;\n" +
+    "  return x;\n" +
+    "}\n" +
+    "void main() {\n" +
+    "  vec2 pCell = vUv * uGridSizeF;\n" +
+    "  ivec2 cell = clamp(ivec2(pCell), ivec2(0), uGridSize - ivec2(1));\n" +
+    "  float cov = obstacleField(pCell, uGridSizeF, uTime, uPortraitBottom, uPortraitN, uPointerActive, uPointerCell, uPointerRadius);\n" +
+    "  vec3 bg = vec3(0.043, 0.043, 0.047);\n" +
+    "  vec3 ink = vec3(0.60, 0.61, 0.65);\n" +
+    "  vec3 result = mix(bg, ink, cov * 0.55);\n" +
+    "  if (uOnlyObstacles < 0.5) {\n" +
+    "    vec4 col = texelFetch(uColorTex, cell, 0);\n" +
+    "    if (col.a > 0.5) {\n" +
+    "      vec4 hom = texelFetch(uHomeTex, cell, 0);\n" +
+    "      float homeX = floor(hom.r*255.0+0.5)*256.0 + floor(hom.g*255.0+0.5);\n" +
+    "      float homeY = floor(hom.b*255.0+0.5)*256.0 + floor(hom.a*255.0+0.5);\n" +
+    "      uint seed = uint(homeX) * 374761393u + uint(homeY) * 668265263u;\n" +
+    "      float jitter = float(hash32(seed) & 0xFFu) / 255.0;\n" +
+    "      float bright = 0.86 + jitter * 0.28;\n" +
+    "      int above = 0;\n" +
+    "      for (int i = 1; i <= 4; i++) {\n" +
+    "        ivec2 c2 = cell - ivec2(0, i);\n" +
+    "        if (c2.y >= 0 && texelFetch(uColorTex, c2, 0).a > 0.5) above++;\n" +
+    "      }\n" +
+    "      float shadow = 1.0 - float(above) * 0.035;\n" +
+    "      result = col.rgb * bright * shadow;\n" +
+    "    }\n" +
+    "  }\n" +
+    "  fragColor = vec4(result, 1.0);\n" +
+    "}\n";
+
+  // -----------------------------------------------------------------------
+  // Rebuild fly-back point sprites
+  // -----------------------------------------------------------------------
+
+  var VS_REBUILD =
+    "#version 300 es\n" +
+    "uniform ivec2 uGridSize;\n" +
+    "uniform vec2 uGridSizeF;\n" +
+    "uniform float uProgress;\n" +
+    "uniform float uPointSizePx;\n" +
+    "uniform sampler2D uColorTex;\n" +
+    "uniform sampler2D uHomeTex;\n" +
+    "out vec4 vColor;\n" +
+    "out float vAlive;\n" +
+    "void main() {\n" +
+    "  int gx = gl_VertexID % uGridSize.x;\n" +
+    "  int gy = gl_VertexID / uGridSize.x;\n" +
+    "  ivec2 cell = ivec2(gx, gy);\n" +
+    "  vec4 col = texelFetch(uColorTex, cell, 0);\n" +
+    "  vAlive = col.a;\n" +
+    "  vColor = col;\n" +
+    "  if (col.a < 0.5) {\n" +
+    "    gl_Position = vec4(2.0, 2.0, 0.0, 1.0);\n" +
+    "    gl_PointSize = 1.0;\n" +
+    "    return;\n" +
+    "  }\n" +
+    "  vec4 hom = texelFetch(uHomeTex, cell, 0);\n" +
+    "  float homeX = floor(hom.r*255.0+0.5)*256.0 + floor(hom.g*255.0+0.5);\n" +
+    "  float homeY = floor(hom.b*255.0+0.5)*256.0 + floor(hom.a*255.0+0.5);\n" +
+    "  vec2 curUv = (vec2(float(gx), float(gy)) + 0.5) / uGridSizeF;\n" +
+    "  vec2 homeUv = (vec2(homeX, homeY) + 0.5) / uGridSizeF;\n" +
+    "  float p = uProgress;\n" +
+    "  float ease = p * p * (3.0 - 2.0 * p);\n" +
+    "  vec2 uv = mix(curUv, homeUv, ease);\n" +
+    "  vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - 2.0 * uv.y);\n" +
+    "  gl_Position = vec4(ndc, 0.0, 1.0);\n" +
+    "  gl_PointSize = uPointSizePx;\n" +
+    "}\n";
+
+  var FS_REBUILD =
+    "#version 300 es\n" +
+    "precision highp float;\n" +
+    "in vec4 vColor;\n" +
+    "in float vAlive;\n" +
+    "out vec4 fragColor;\n" +
+    "void main() {\n" +
+    "  if (vAlive < 0.5) discard;\n" +
+    "  vec2 d = gl_PointCoord - vec2(0.5);\n" +
+    "  float r = length(d);\n" +
+    "  if (r > 0.5) discard;\n" +
+    "  float edge = smoothstep(0.5, 0.3, r);\n" +
+    "  fragColor = vec4(vColor.rgb, edge);\n" +
+    "}\n";
+
+  // -----------------------------------------------------------------------
+  // GL helpers
+  // -----------------------------------------------------------------------
+
+  function compileShader(type, src, label) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      var log = gl.getShaderInfoLog(sh);
+      console.error("Shader compile error (" + label + "):\n" + log);
+      throw new Error("Shader compile error (" + label + "): " + log);
+    }
+    return sh;
+  }
+
+  function createProgram(vsSrc, fsSrc, label) {
+    var vs = compileShader(gl.VERTEX_SHADER, vsSrc, label + ":vs");
+    var fs = compileShader(gl.FRAGMENT_SHADER, fsSrc, label + ":fs");
+    var p = gl.createProgram();
+    gl.attachShader(p, vs);
+    gl.attachShader(p, fs);
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      var log = gl.getProgramInfoLog(p);
+      console.error("Program link error (" + label + "):\n" + log);
+      throw new Error("Program link error (" + label + "): " + log);
+    }
+    return p;
+  }
+
+  function uniforms(program, names) {
+    var u = {};
+    names.forEach(function (n) { u[n] = gl.getUniformLocation(program, n); });
+    return u;
+  }
+
+  var progObstacle = createProgram(VS_PLAIN, FS_OBSTACLE, "obstacle");
+  var progCA = createProgram(VS_PLAIN, FS_CASTEP, "ca-step");
+  var progRender = createProgram(VS_SCREEN, FS_RENDER, "render");
+  var progRebuild = createProgram(VS_REBUILD, FS_REBUILD, "rebuild");
+
+  var U_OBS = uniforms(progObstacle, ["uGridSizeF", "uTime", "uPortraitBottom", "uPortraitN", "uPointerActive", "uPointerCell", "uPointerRadius"]);
+  var U_CA = uniforms(progCA, ["uColorTex", "uHomeTex", "uStillTex", "uObstacleTex", "uGridSize", "uParity", "uStep", "uStickiness", "uFallActive", "uFallElapsed", "uReleaseSpan", "uPortraitTopRow", "uPortraitN"]);
+  var U_RENDER = uniforms(progRender, ["uColorTex", "uHomeTex", "uGridSize", "uGridSizeF", "uTime", "uPortraitBottom", "uPortraitN", "uPointerActive", "uPointerCell", "uPointerRadius", "uOnlyObstacles"]);
+  var U_REBUILD = uniforms(progRebuild, ["uGridSize", "uGridSizeF", "uProgress", "uPointSizePx", "uColorTex", "uHomeTex"]);
+
+  // Fullscreen quad (shared by obstacle / CA / render passes)
+  var quadVerts = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
+  var quadVBO = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadVBO);
+  gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+
+  function makeQuadVAO(program) {
+    var vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadVBO);
+    var loc = gl.getAttribLocation(program, "aPos");
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    return vao;
+  }
+
+  var vaoObstacle = makeQuadVAO(progObstacle);
+  var vaoCA = makeQuadVAO(progCA);
+  var vaoRender = makeQuadVAO(progRender);
+  var vaoEmpty = gl.createVertexArray(); // for gl_VertexID-driven point draw
+
+  // -----------------------------------------------------------------------
+  // Simulation state (rebuilt on load / resize)
+  // -----------------------------------------------------------------------
+
+  var gridW = 0, gridH = 0;
+  var colorTex = [null, null];
+  var homeTex = [null, null];
+  var stillTex = [null, null];
+  var fboCA = [null, null];
+  var obstacleTex = null;
+  var fboObstacle = null;
+  var currentRead = 0;
+  var stepCount = 0;
+
+  var initColorData = null, initHomeData = null;
+  var portraitTopRow = 0, portraitN = 0, portraitBottomFrac = 0.4;
+  var pointerRadiusCells = 6;
+
+  var gravityOn = false;
+  var rebuilding = false;
+  var fallStartTime = 0;
+  var rebuildStartTime = 0;
+  var accumTime = 0;
+
+  var pointerActive = false;
+  var pointerCell = [0, 0];
+
+  var sourceImage = null;
+  var ready = false;
+
+  function makeTex(w, h, data) {
+    var t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    return t;
+  }
+
+  function uploadTex(tex, w, h, data) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  }
+
+  function makeFBO(pairs) {
+    var fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    var drawBuffers = [];
+    pairs.forEach(function (pr) {
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, pr.slot, gl.TEXTURE_2D, pr.tex, 0);
+      drawBuffers.push(pr.slot);
+    });
+    gl.drawBuffers(drawBuffers);
+    var status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      console.error("Framebuffer incomplete:", status);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return fbo;
+  }
+
+  // -----------------------------------------------------------------------
+  // Build the initial portrait-as-sand data from the image
+  // -----------------------------------------------------------------------
+
+  function buildInitialData(img, gw, gh) {
+    var topMarginFrac = 0.015;
+    var heightFrac = 0.50;
+    var N = Math.round(gh * heightFrac);
+    N = Math.min(N, Math.round(gw * 0.90));
+    N = Math.max(N, 10);
+    var topRow = Math.round(gh * topMarginFrac);
+    var leftCol = Math.round((gw - N) / 2);
+
+    // Draw the source image once at native resolution, then box-filter
+    // (area-average) it down to N x N ourselves. A single very large
+    // drawImage downscale (~12x) produces moire/stripe aliasing in
+    // Chromium; averaging each output cell over its true source footprint
+    // avoids that entirely.
+    var srcW = img.naturalWidth, srcH = img.naturalHeight;
+    var full = document.createElement("canvas");
+    full.width = srcW; full.height = srcH;
+    var fctx = full.getContext("2d");
+    fctx.drawImage(img, 0, 0);
+    var src = fctx.getImageData(0, 0, srcW, srcH).data;
+
+    function avgBlock(x0, y0, x1, y1) {
+      var rs = 0, gs = 0, bs = 0, n = 0;
+      for (var yy = y0; yy < y1; yy++) {
+        var rowBase = yy * srcW * 4;
+        for (var xx = x0; xx < x1; xx++) {
+          var ii = rowBase + xx * 4;
+          rs += src[ii]; gs += src[ii + 1]; bs += src[ii + 2]; n++;
+        }
+      }
+      if (n === 0) return [0, 0, 0];
+      return [rs / n, gs / n, bs / n];
+    }
+
+    var patch = Math.max(4, Math.floor(srcW * 0.03));
+    var c1 = avgBlock(0, 0, patch, patch);
+    var c2 = avgBlock(srcW - patch, 0, srcW, patch);
+    var c3 = avgBlock(0, srcH - patch, patch, srcH);
+    var c4 = avgBlock(srcW - patch, srcH - patch, srcW, srcH);
+    var bg = [
+      (c1[0] + c2[0] + c3[0] + c4[0]) / 4,
+      (c1[1] + c2[1] + c3[1] + c4[1]) / 4,
+      (c1[2] + c2[2] + c3[2] + c4[2]) / 4
+    ];
+
+    var colorData = new Uint8Array(gw * gh * 4);
+    var homeData = new Uint8Array(gw * gh * 4);
+    var count = 0;
+    var cellPx = srcW / N;
+
+    for (var y = 0; y < N; y++) {
+      var sy0 = Math.floor(y * cellPx);
+      var sy1 = Math.min(srcH, Math.max(sy0 + 1, Math.floor((y + 1) * cellPx)));
+      for (var x = 0; x < N; x++) {
+        var sx0 = Math.floor(x * cellPx);
+        var sx1 = Math.min(srcW, Math.max(sx0 + 1, Math.floor((x + 1) * cellPx)));
+        var avg = avgBlock(sx0, sy0, sx1, sy1);
+        var r = avg[0], g = avg[1], b = avg[2];
+        var luma = 0.299 * r + 0.587 * g + 0.114 * b;
+        var dr = r - bg[0], dg = g - bg[1], db = b - bg[2];
+        var dist = Math.sqrt(dr * dr + dg * dg + db * db);
+        var isBg = (dist < 38 && luma < 110) || luma < 14;
+        if (!isBg) {
+          var gx = leftCol + x, gy = topRow + y;
+          var gi = (gy * gw + gx) * 4;
+          colorData[gi] = r; colorData[gi + 1] = g; colorData[gi + 2] = b; colorData[gi + 3] = 255;
+          homeData[gi] = Math.floor(gx / 256);
+          homeData[gi + 1] = gx % 256;
+          homeData[gi + 2] = Math.floor(gy / 256);
+          homeData[gi + 3] = gy % 256;
+          count++;
+        }
+      }
+    }
+    return { colorData: colorData, homeData: homeData, N: N, topRow: topRow, leftCol: leftCol, count: count };
+  }
+
+  // -----------------------------------------------------------------------
+  // (Re)build grid, textures and initial state
+  // -----------------------------------------------------------------------
+
+  function computeGridSize(cssW, cssH) {
+    var aspect = cssW / cssH;
+    var gw = Math.round(Math.sqrt(TARGET_CELLS * aspect));
+    gw = Math.max(260, Math.min(640, gw));
+    var gh = Math.round(gw / aspect);
+    gh = Math.max(260, Math.min(900, gh));
+    return { gw: gw, gh: gh };
+  }
+
+  function setupSimulation() {
+    if (!sourceImage) return;
+
+    var dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    var reserved = 108; // controls + caption + gaps
+    var availW = Math.max(240, window.innerWidth - 40);
+    var availH = Math.max(200, window.innerHeight - reserved);
+    var cssW = Math.floor(availW);
+    var cssH = Math.floor(availH);
+
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+
+    var g = computeGridSize(cssW, cssH);
+    gridW = g.gw; gridH = g.gh;
+
+    var built = buildInitialData(sourceImage, gridW, gridH);
+    initColorData = built.colorData;
+    initHomeData = built.homeData;
+    portraitTopRow = built.topRow;
+    portraitN = built.N;
+    portraitBottomFrac = (built.topRow + built.N) / gridH;
+    pointerRadiusCells = Math.max(3.0, gridH * 0.02);
+
+    // (Re)create textures sized to the new grid
+    colorTex[0] = makeTex(gridW, gridH, initColorData);
+    colorTex[1] = makeTex(gridW, gridH, null);
+    homeTex[0] = makeTex(gridW, gridH, initHomeData);
+    homeTex[1] = makeTex(gridW, gridH, null);
+    var zeroStill = new Uint8Array(gridW * gridH * 4);
+    stillTex[0] = makeTex(gridW, gridH, zeroStill);
+    stillTex[1] = makeTex(gridW, gridH, zeroStill);
+    obstacleTex = makeTex(gridW, gridH, null);
+
+    fboCA[0] = makeFBO([{ slot: gl.COLOR_ATTACHMENT0, tex: colorTex[0] }, { slot: gl.COLOR_ATTACHMENT1, tex: homeTex[0] }, { slot: gl.COLOR_ATTACHMENT2, tex: stillTex[0] }]);
+    fboCA[1] = makeFBO([{ slot: gl.COLOR_ATTACHMENT0, tex: colorTex[1] }, { slot: gl.COLOR_ATTACHMENT1, tex: homeTex[1] }, { slot: gl.COLOR_ATTACHMENT2, tex: stillTex[1] }]);
+    fboObstacle = makeFBO([{ slot: gl.COLOR_ATTACHMENT0, tex: obstacleTex }]);
+
+    currentRead = 0;
+    stepCount = 0;
+    gravityOn = false;
+    rebuilding = false;
+    ready = true;
+
+    updateButtons();
+  }
+
+  function resetToPristine() {
+    uploadTex(colorTex[0], gridW, gridH, initColorData);
+    uploadTex(homeTex[0], gridW, gridH, initHomeData);
+    uploadTex(colorTex[1], gridW, gridH, null);
+    uploadTex(homeTex[1], gridW, gridH, null);
+    uploadTex(stillTex[0], gridW, gridH, null);
+    uploadTex(stillTex[1], gridW, gridH, null);
+    currentRead = 0;
+    stepCount = 0;
+  }
+
+  // -----------------------------------------------------------------------
+  // Render passes
+  // -----------------------------------------------------------------------
+
+  function runObstaclePass(t) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboObstacle);
+    gl.viewport(0, 0, gridW, gridH);
+    gl.useProgram(progObstacle);
+    gl.bindVertexArray(vaoObstacle);
+    gl.uniform2f(U_OBS.uGridSizeF, gridW, gridH);
+    gl.uniform1f(U_OBS.uTime, t);
+    gl.uniform1f(U_OBS.uPortraitBottom, portraitBottomFrac);
+    gl.uniform1f(U_OBS.uPortraitN, portraitN);
+    gl.uniform1f(U_OBS.uPointerActive, pointerActive ? 1 : 0);
+    gl.uniform2f(U_OBS.uPointerCell, pointerCell[0], pointerCell[1]);
+    gl.uniform1f(U_OBS.uPointerRadius, pointerRadiusCells);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  function runCAStep(fallElapsed) {
+    var writeIdx = 1 - currentRead;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboCA[writeIdx]);
+    gl.viewport(0, 0, gridW, gridH);
+    gl.useProgram(progCA);
+    gl.bindVertexArray(vaoCA);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, colorTex[currentRead]);
+    gl.uniform1i(U_CA.uColorTex, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, homeTex[currentRead]);
+    gl.uniform1i(U_CA.uHomeTex, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, obstacleTex);
+    gl.uniform1i(U_CA.uObstacleTex, 2);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, stillTex[currentRead]);
+    gl.uniform1i(U_CA.uStillTex, 3);
+
+    gl.uniform2i(U_CA.uGridSize, gridW, gridH);
+    gl.uniform1i(U_CA.uParity, stepCount & 1);
+    gl.uniform1i(U_CA.uStep, stepCount);
+    gl.uniform1f(U_CA.uStickiness, STICKINESS);
+    gl.uniform1f(U_CA.uFallActive, gravityOn ? 1 : 0);
+    gl.uniform1f(U_CA.uFallElapsed, fallElapsed);
+    gl.uniform1f(U_CA.uReleaseSpan, RELEASE_SPAN);
+    gl.uniform1f(U_CA.uPortraitTopRow, portraitTopRow);
+    gl.uniform1f(U_CA.uPortraitN, portraitN);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    stepCount++;
+    currentRead = writeIdx;
+  }
+
+  function renderNormal(t, onlyObstacles) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(progRender);
+    gl.bindVertexArray(vaoRender);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, colorTex[currentRead]);
+    gl.uniform1i(U_RENDER.uColorTex, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, homeTex[currentRead]);
+    gl.uniform1i(U_RENDER.uHomeTex, 1);
+
+    gl.uniform2i(U_RENDER.uGridSize, gridW, gridH);
+    gl.uniform2f(U_RENDER.uGridSizeF, gridW, gridH);
+    gl.uniform1f(U_RENDER.uTime, t);
+    gl.uniform1f(U_RENDER.uPortraitBottom, portraitBottomFrac);
+    gl.uniform1f(U_RENDER.uPortraitN, portraitN);
+    gl.uniform1f(U_RENDER.uPointerActive, pointerActive ? 1 : 0);
+    gl.uniform2f(U_RENDER.uPointerCell, pointerCell[0], pointerCell[1]);
+    gl.uniform1f(U_RENDER.uPointerRadius, pointerRadiusCells);
+    gl.uniform1f(U_RENDER.uOnlyObstacles, onlyObstacles ? 1 : 0);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  function renderRebuild(t, progress) {
+    // background: obstacles only (physics is frozen during the flight)
+    renderNormal(t, true);
+
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(progRebuild);
+    gl.bindVertexArray(vaoEmpty);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, colorTex[currentRead]);
+    gl.uniform1i(U_REBUILD.uColorTex, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, homeTex[currentRead]);
+    gl.uniform1i(U_REBUILD.uHomeTex, 1);
+
+    gl.uniform2i(U_REBUILD.uGridSize, gridW, gridH);
+    gl.uniform2f(U_REBUILD.uGridSizeF, gridW, gridH);
+    gl.uniform1f(U_REBUILD.uProgress, progress);
+    var pxSize = Math.max(1.2, Math.min(canvas.width / gridW, canvas.height / gridH) * 1.35);
+    gl.uniform1f(U_REBUILD.uPointSizePx, pxSize);
+
+    gl.drawArrays(gl.POINTS, 0, gridW * gridH);
+    gl.disable(gl.BLEND);
+  }
+
+  // -----------------------------------------------------------------------
+  // Controls
+  // -----------------------------------------------------------------------
+
+  function updateButtons() {
+    btnFall.disabled = !ready || gravityOn || rebuilding;
+    btnRebuild.disabled = !ready || rebuilding;
+  }
+
+  function startFall() {
+    if (!ready || gravityOn || rebuilding) return;
+    gravityOn = true;
+    fallStartTime = accumTime;
+    updateButtons();
+  }
+
+  function startRebuild() {
+    if (!ready || rebuilding) return;
+    rebuilding = true;
+    gravityOn = false;
+    rebuildStartTime = accumTime;
+    pointerActive = false;
+    updateButtons();
+  }
+
+  function finishRebuild() {
+    resetToPristine();
+    rebuilding = false;
+    gravityOn = false;
+    updateButtons();
+  }
+
+  btnFall.addEventListener("click", startFall);
+  btnRebuild.addEventListener("click", startRebuild);
+  window.addEventListener("keydown", function (e) {
+    if (e.key === "r" || e.key === "R") startRebuild();
+  });
+
+  function cellFromEvent(e) {
+    var rect = canvas.getBoundingClientRect();
+    var u = (e.clientX - rect.left) / rect.width;
+    var v = (e.clientY - rect.top) / rect.height;
+    return [u * gridW, v * gridH];
+  }
+
+  canvas.addEventListener("pointerdown", function (e) {
+    if (!ready) return;
+    if (!gravityOn && !rebuilding) {
+      startFall();
+      return;
+    }
+    if (gravityOn && !rebuilding) {
+      pointerActive = true;
+      pointerCell = cellFromEvent(e);
+      canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId);
+    }
+  });
+  canvas.addEventListener("pointermove", function (e) {
+    if (pointerActive) pointerCell = cellFromEvent(e);
+  });
+  function endPointer() { pointerActive = false; }
+  canvas.addEventListener("pointerup", endPointer);
+  canvas.addEventListener("pointercancel", endPointer);
+  canvas.addEventListener("pointerleave", endPointer);
+
+  // -----------------------------------------------------------------------
+  // Resize
+  // -----------------------------------------------------------------------
+
+  var resizeTimer = null;
+  window.addEventListener("resize", function () {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () { setupSimulation(); }, 200);
+  });
+
+  // -----------------------------------------------------------------------
+  // Main loop
+  // -----------------------------------------------------------------------
+
+  var lastFrameTime = null;
+  var rafId = null;
+
+  function frame(now) {
+    if (lastFrameTime !== null) {
+      accumTime += (now - lastFrameTime) / 1000;
+    }
+    lastFrameTime = now;
+
+    if (ready) {
+      if (rebuilding) {
+        var p = (accumTime - rebuildStartTime) / REBUILD_DURATION;
+        if (p >= 1.0) {
+          finishRebuild();
+          renderNormal(accumTime, false);
+        } else {
+          renderRebuild(accumTime, p);
+        }
+      } else {
+        if (gravityOn) {
+          runObstaclePass(accumTime);
+          var fallElapsed = accumTime - fallStartTime;
+          for (var k = 0; k < SUBSTEPS_PER_FRAME; k++) {
+            runCAStep(fallElapsed);
+          }
+        } else {
+          runObstaclePass(accumTime);
+        }
+        renderNormal(accumTime, false);
+      }
+    }
+
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function start() {
+    if (rafId === null) {
+      lastFrameTime = null;
+      rafId = requestAnimationFrame(frame);
+    }
+  }
+  function stop() {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) stop(); else start();
+  });
+
+  // -----------------------------------------------------------------------
+  // Load image, then boot
+  // -----------------------------------------------------------------------
+
+  var img = new Image();
+  img.crossOrigin = "anonymous";
+  img.onload = function () {
+    sourceImage = img;
+    setupSimulation();
+  };
+  img.onerror = function (e) {
+    console.error("Failed to load portrait image", e);
+  };
+  img.src = "/public/images/home-about.webp";
+
+  // -----------------------------------------------------------------------
+  // Debug hooks for automated testing
+  // -----------------------------------------------------------------------
+
+  window.__sand = {
+    letItFall: startFall,
+    rebuild: startRebuild,
+    state: function () {
+      return { ready: ready, gravityOn: gravityOn, rebuilding: rebuilding, gridW: gridW, gridH: gridH };
+    },
+    countGrains: function () {
+      if (!ready) return -1;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fboCA[currentRead]);
+      var buf = new Uint8Array(gridW * gridH * 4);
+      gl.readPixels(0, 0, gridW, gridH, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      var n = 0;
+      for (var i = 3; i < buf.length; i += 4) { if (buf[i] > 128) n++; }
+      return n;
+    }
+  };
+
+  start();
+})();
+</script>
+<script id="adina-context-guard">
+// Browsers cap the number of live WebGL contexts (~16) and drop the oldest when more tabs open one.
+// If that happens to this page, reload it the next time the tab is shown.
+(() => {
+  let lost = false;
+  document.addEventListener('webglcontextlost', (e) => { e.preventDefault(); lost = true; }, true);
+  const reloadIfLost = () => { if (lost && document.visibilityState === 'visible') location.reload(); };
+  document.addEventListener('visibilitychange', reloadIfLost);
+  window.addEventListener('focus', reloadIfLost);
+})();
+</script>
+</body>
+</html>

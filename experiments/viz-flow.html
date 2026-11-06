@@ -1,0 +1,1028 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Flow field — audio-reactive visualizer</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #030305;
+    color: #e8e8ea;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  body {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    touch-action: none;
+  }
+  canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: pointer;
+  }
+
+  .back-link {
+    position: fixed;
+    top: 16px;
+    left: 18px;
+    font-size: 13px;
+    letter-spacing: .02em;
+    color: rgba(232,232,234,0.55);
+    text-decoration: none;
+    z-index: 30;
+    mix-blend-mode: screen;
+  }
+  .back-link:hover { color: #e8e8ea; }
+
+  .title-tag {
+    position: fixed;
+    top: 16px;
+    right: 18px;
+    font-size: 11.5px;
+    letter-spacing: .03em;
+    color: rgba(232,232,234,0.35);
+    z-index: 30;
+    text-align: right;
+    pointer-events: none;
+    mix-blend-mode: screen;
+  }
+
+  .controls {
+    position: fixed;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(8,8,11,0.45);
+    border: 1px solid rgba(255,255,255,0.08);
+    backdrop-filter: blur(6px);
+    border-radius: 100px;
+    padding: 7px 8px 7px 14px;
+    max-width: calc(100vw - 24px);
+  }
+  .now-playing {
+    font-size: 11.5px;
+    letter-spacing: .02em;
+    color: rgba(232,232,234,0.75);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 38vw;
+  }
+  select.track-picker {
+    appearance: none;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: #e8e8ea;
+    font-size: 11.5px;
+    letter-spacing: .02em;
+    padding: 6px 26px 6px 10px;
+    border-radius: 100px;
+    cursor: pointer;
+    max-width: 40vw;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23c8c8cc'><path d='M7 10l5 5 5-5z'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+    background-size: 14px;
+  }
+  select.track-picker:hover { border-color: rgba(255,255,255,0.25); }
+  .play-btn {
+    appearance: none;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: #e8e8ea;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  .play-btn:hover { border-color: rgba(255,255,255,0.3); }
+  .play-btn svg { width: 11px; height: 11px; fill: #e8e8ea; }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    background: radial-gradient(ellipse at center, rgba(10,10,14,0.35) 0%, rgba(3,3,5,0.78) 100%);
+    cursor: pointer;
+    transition: opacity .6s ease;
+    z-index: 20;
+    text-align: center;
+    padding: 20px;
+  }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  .play-ring {
+    width: 68px;
+    height: 68px;
+    border-radius: 50%;
+    border: 1px solid rgba(232,232,234,0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .play-ring svg { width: 20px; height: 20px; fill: #e8e8ea; margin-left: 3px; }
+  .overlay .label {
+    font-size: 14px;
+    letter-spacing: .03em;
+    color: #e8e8ea;
+  }
+  .overlay .sub {
+    font-size: 12px;
+    color: #9a9a9f;
+    max-width: 26em;
+    line-height: 1.6;
+  }
+  .overlay .warn {
+    font-size: 12.5px;
+    color: #d8a0a0;
+    max-width: 26em;
+    line-height: 1.6;
+  }
+
+  .status {
+    position: fixed;
+    bottom: 16px;
+    right: 18px;
+    font-size: 10.5px;
+    color: rgba(255,255,255,0.22);
+    letter-spacing: .02em;
+    z-index: 30;
+    pointer-events: none;
+  }
+
+  @media (max-width: 480px) {
+    .now-playing { display: none; }
+    select.track-picker { max-width: 56vw; }
+    .status { display: none; }
+  }
+</style>
+</head>
+<body>
+
+  <a class="back-link" href="/experiments/">&larr; experiments</a>
+  <div class="title-tag">Adina Manghi Forsberg<br>flow field</div>
+
+  <canvas id="gpu"></canvas>
+
+  <div class="overlay" id="overlay">
+    <div class="play-ring"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
+    <div class="label" id="overlayLabel">click to play</div>
+    <div class="sub" id="overlaySub">a million points of light drift on a current shaped by the music.</div>
+  </div>
+
+  <div class="controls" id="controls" style="display:none;">
+    <button class="play-btn" id="playBtn" type="button" aria-label="play / pause">
+      <svg id="playIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+    </button>
+    <span class="now-playing" id="nowPlaying">—</span>
+    <select class="track-picker" id="trackPicker"></select>
+  </div>
+
+  <div class="status" id="status">booting…</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------------
+  // tracks
+  // ---------------------------------------------------------------------
+  var TRACKS = [
+    { file: "droplet",            label: "Droplet" },
+    { file: "arvegods",           label: "Arvegods" },
+    { file: "tystnadens-ro",      label: "Tystnadens ro" },
+    { file: "canis-major",        label: "Canis Major" },
+    { file: "scyphozoa",          label: "Scyphozoa" },
+    { file: "maxima-minima",      label: "Maxima Minima" },
+    { file: "kalis-daughters",    label: "Kali's Daughters" },
+    { file: "scen-v-1",           label: "Scen V (I)" },
+    { file: "scen-v-2",           label: "Scen V (II)" },
+    { file: "scen-v-3",           label: "Scen V (III)" },
+    { file: "emigrantvisa",       label: "Emigrantvisa" },
+    { file: "you-are-my-sunshine",label: "You're My Sunshine" },
+    { file: "zwampen",            label: "Zwampen" },
+    { file: "love-me-tender",     label: "Love Me Tender" }
+  ];
+  var AUDIO_BASES = ["/audio/", "/public/audio/"];
+
+  var statusEl = document.getElementById("status");
+  function setStatus(s) { statusEl.textContent = s; }
+
+  var overlay = document.getElementById("overlay");
+  var overlayLabel = document.getElementById("overlayLabel");
+  var overlaySub = document.getElementById("overlaySub");
+
+  function fail(message) {
+    overlayLabel.textContent = "WebGPU is unavailable";
+    overlaySub.textContent = "";
+    var warn = document.createElement("div");
+    warn.className = "warn";
+    warn.textContent = message;
+    overlay.querySelector(".play-ring").style.display = "none";
+    overlay.appendChild(warn);
+    overlay.style.cursor = "default";
+    setStatus("unavailable");
+  }
+
+  if (!navigator.gpu) {
+    fail("This browser doesn't support WebGPU yet. Try a recent Chrome, Edge, or another WebGPU-capable browser.");
+    return;
+  }
+
+  // ---------------------------------------------------------------------
+  // canvas / device setup
+  // ---------------------------------------------------------------------
+  var canvas = document.getElementById("gpu");
+  var presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+  var device = null, context = null;
+  var PARTICLE_COUNT = 100000;
+  var activeCount = PARTICLE_COUNT;
+
+  async function init() {
+    var adapter;
+    try {
+      adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+    } catch (e) { adapter = null; }
+    if (!adapter) { fail("No WebGPU adapter is available on this device/browser."); return; }
+
+    try {
+      device = await adapter.requestDevice();
+    } catch (e) {
+      fail("WebGPU device creation failed: " + e.message);
+      return;
+    }
+
+    device.lost.then(function (info) {
+      setStatus("device lost: " + info.message);
+    });
+    var errorCount = 0;
+    device.addEventListener("uncapturederror", function (ev) {
+      errorCount++;
+      console.error("[WebGPU error]", ev.error.message);
+      setStatus("WebGPU error (" + errorCount + "): " + ev.error.message.slice(0, 60));
+    });
+
+    context = canvas.getContext("webgpu");
+    context.configure({
+      device: device,
+      format: presentationFormat,
+      alphaMode: "opaque"
+    });
+
+    buildScene();
+    window.__viz.errorCount = function () { return errorCount; };
+  }
+
+  // ---------------------------------------------------------------------
+  // WGSL
+  // ---------------------------------------------------------------------
+  var WGSL = `
+struct Uniforms {
+  a0: vec4f, // time, dt, aspect, count
+  a1: vec4f, // lowE, midE, highE, loud
+  a2: vec4f, // speed, timeScale, flowScale, detail
+  a3: vec4f, // hueShift, warmFlash, brightness, onset
+  a4: vec4f, // fieldPhase, burstX, burstY, burstStrength
+  a5: vec4f, // decay, pointSize(unused), bloomAmt, segAlpha
+};
+
+@group(0) @binding(0) var<uniform> U: Uniforms;
+@group(0) @binding(1) var<storage, read_write> posBufRW: array<vec4f>;
+@group(0) @binding(2) var<storage, read_write> velBufRW: array<vec4f>;
+
+@group(0) @binding(0) var<storage, read> posBufR: array<vec4f>;
+@group(0) @binding(1) var<storage, read> velBufR: array<vec4f>;
+@group(0) @binding(2) var<uniform> U2: Uniforms;
+
+@group(0) @binding(0) var samp: sampler;
+@group(0) @binding(1) var srcTex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> U3: Uniforms;
+
+fn hash13(p3in: vec3f) -> f32 {
+  var p3 = fract(p3in * 0.1031);
+  p3 += dot(p3, p3.zyx + 31.32);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
+fn vnoise(p: vec3f) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  let c000 = hash13(i + vec3f(0.0, 0.0, 0.0));
+  let c100 = hash13(i + vec3f(1.0, 0.0, 0.0));
+  let c010 = hash13(i + vec3f(0.0, 1.0, 0.0));
+  let c110 = hash13(i + vec3f(1.0, 1.0, 0.0));
+  let c001 = hash13(i + vec3f(0.0, 0.0, 1.0));
+  let c101 = hash13(i + vec3f(1.0, 0.0, 1.0));
+  let c011 = hash13(i + vec3f(0.0, 1.0, 1.0));
+  let c111 = hash13(i + vec3f(1.0, 1.0, 1.0));
+  let x00 = mix(c000, c100, u.x);
+  let x10 = mix(c010, c110, u.x);
+  let x01 = mix(c001, c101, u.x);
+  let x11 = mix(c011, c111, u.x);
+  let y0 = mix(x00, x10, u.y);
+  let y1 = mix(x01, x11, u.y);
+  return mix(y0, y1, u.z);
+}
+
+fn fbmPsi(p: vec3f, detail: f32) -> f32 {
+  let n = vnoise(p);
+  let n2 = vnoise(p * 2.6 + vec3f(31.7, -17.3, 9.1));
+  return n + detail * 0.35 * (n2 - 0.5);
+}
+
+// ---------------- compute: advect particles ----------------
+@compute @workgroup_size(256)
+fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= u32(U.a0.w)) { return; }
+
+  var p = posBufRW[i];
+  var v = velBufRW[i];
+
+  let scale = U.a2.z;
+  let detail = U.a2.w;
+  let t = U.a0.x * U.a2.y + U.a4.x;
+  let eps = 0.14;
+
+  // a single, gentle large-scale warp keeps the field from locking into a
+  // visible lattice while leaving only a handful of broad, slowly turning
+  // currents on screen — no fine wobble, so the resulting streamlines stay
+  // smooth and long rather than hairy.
+  let warpT = U.a0.x * 0.02 + U.a4.x * 0.1;
+  let warpX = vnoise(vec3f(p.x * 0.12, p.y * 0.12, warpT)) * 2.0 - 1.0;
+  let warpY = vnoise(vec3f(p.x * 0.12 + 19.3, p.y * 0.12 - 7.7, warpT)) * 2.0 - 1.0;
+  let pw = vec2f(p.x + warpX * 0.5, p.y + warpY * 0.5);
+
+  let basePos = vec3f(pw.x * scale, pw.y * scale, t + p.z * 41.0);
+  let nY1 = fbmPsi(basePos + vec3f(0.0, eps, 0.0), detail);
+  let nY2 = fbmPsi(basePos - vec3f(0.0, eps, 0.0), detail);
+  let nX1 = fbmPsi(basePos + vec3f(eps, 0.0, 0.0), detail);
+  let nX2 = fbmPsi(basePos - vec3f(eps, 0.0, 0.0), detail);
+  let dPsiDy = (nY1 - nY2) / (2.0 * eps);
+  let dPsiDx = (nX1 - nX2) / (2.0 * eps);
+  let curl = vec2f(dPsiDy, -dPsiDx);
+
+  // onset impulse: a rotational (curl) kick around a point — strengthens
+  // whatever current is near it into a brief, visible swirl, rather than
+  // blasting particles outward or rewriting the field's seed.
+  let toP = vec2f(p.x, p.y) - vec2f(U.a4.y, U.a4.z);
+  let d = length(toP) + 1e-4;
+  let perp = vec2f(-toP.y, toP.x) / d;
+  let spin = perp * U.a4.w * exp(-d * 1.1);
+
+  let targetVel = curl * U.a2.x + spin;
+  let newVelXY = mix(v.xy, targetVel, 0.1);
+  v = vec4f(newVelXY, v.z, v.w);
+
+  var newPos = vec2f(p.x, p.y) + v.xy * U.a0.y;
+
+  let aspect = U.a0.z;
+  let bx = aspect + 0.18;
+  let by = 1.0 + 0.18;
+  if (newPos.x > bx) { newPos.x = newPos.x - 2.0 * bx; }
+  if (newPos.x < -bx) { newPos.x = newPos.x + 2.0 * bx; }
+  if (newPos.y > by) { newPos.y = newPos.y - 2.0 * by; }
+  if (newPos.y < -by) { newPos.y = newPos.y + 2.0 * by; }
+
+  // particles live long (10-30s) and, once spent, re-enter from one of a
+  // handful of short, slowly orbiting source bands rather than scattering
+  // uniformly across the screen — this seeds a few coherent streams that
+  // the field then bends into ribbons, leaving genuine dark space between
+  // them instead of an even carpet.
+  let lifespan = 10.0 + 20.0 * hash13(vec3f(p.z * 31.7, 11.3, 0.0));
+  let age = p.w + U.a0.y;
+
+  if (age > lifespan) {
+    let emitter = f32(i % 5u);
+    let ecx = (bx * 0.55) * sin(U.a0.x * 0.045 + emitter * 1.7);
+    let ecy = (by * 0.55) * cos(U.a0.x * 0.038 + emitter * 2.3 + 0.6);
+    let eAngle = U.a0.x * 0.02 + emitter * 0.9;
+    let edx = cos(eAngle);
+    let edy = sin(eAngle);
+    let rAlong = hash13(vec3f(f32(i) * 0.0271, U.a0.x * 0.77, 2.0)) * 2.0 - 1.0;
+    let rz = hash13(vec3f(f32(i) * 0.0391, U.a0.x * 0.53, 3.0));
+    let along = rAlong * 0.4;
+    let spawnPos = vec2f(ecx + edx * along, ecy + edy * along);
+    posBufRW[i] = vec4f(spawnPos, rz, 0.0);
+    velBufRW[i] = vec4f(0.0, 0.0, v.z, 0.0);
+    return;
+  }
+
+  posBufRW[i] = vec4f(newPos, p.z, age);
+  velBufRW[i] = v;
+}
+
+fn palette(t: f32) -> vec3f {
+  let tt = fract(t);
+  let cInk = vec3f(0.07, 0.11, 0.34);
+  let cTeal = vec3f(0.06, 0.46, 0.46);
+  let cGold = vec3f(0.95, 0.74, 0.36);
+  let cRose = vec3f(0.80, 0.28, 0.40);
+  let seg = tt * 4.0;
+  let i0 = floor(seg);
+  let f = seg - i0;
+  var c0: vec3f;
+  var c1: vec3f;
+  if (i0 < 1.0) { c0 = cInk; c1 = cTeal; }
+  else if (i0 < 2.0) { c0 = cTeal; c1 = cGold; }
+  else if (i0 < 3.0) { c0 = cGold; c1 = cRose; }
+  else { c0 = cRose; c1 = cInk; }
+  return mix(c0, c1, f);
+}
+
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) color: vec4f
+};
+
+@vertex
+fn vs_particle(@builtin(vertex_index) vIdx: u32) -> VSOut {
+  let particleIdx = vIdx / 2u;
+  let isHead = (vIdx % 2u) == 1u;
+  let p = posBufR[particleIdx];
+  let v = velBufR[particleIdx];
+
+  let aspect = U2.a0.z;
+  let speedN = clamp(length(v.xy) * 2.2, 0.0, 1.0);
+
+  // each particle is drawn as exactly the segment it moved this frame (its
+  // true previous position to its current one) at a very low, additive
+  // alpha. Consecutive frames' segments join up into one continuous curve,
+  // so a long-exposure thread only emerges from many frames' worth of
+  // accumulation (and brightens further wherever several particles' paths
+  // happen to coincide) rather than any single frame drawing a long mark.
+  // a true single-frame displacement is often sub-pixel at this drift speed,
+  // which GPU line rasterization can drop entirely some frames (nothing to
+  // cover a pixel centre) — multiplying by a small constant keeps segments
+  // short but reliably visible every frame, so accumulation is continuous.
+  let seg = v.xy * U2.a0.y * 3.2;
+  var worldPos: vec2f;
+  if (isHead) { worldPos = vec2f(p.x, p.y); } else { worldPos = vec2f(p.x, p.y) - seg; }
+
+  var out: VSOut;
+  out.pos = vec4f(worldPos.x / aspect, worldPos.y, 0.0, 1.0);
+
+  // spatially coherent hue field: nearby particles share colour so swirls read
+  // as coloured currents rather than additive noise averaging toward grey.
+  let hueField = vnoise(vec3f(p.x * 0.3, p.y * 0.3, U2.a0.x * 0.02 + U2.a4.x * 0.1)) * 0.7
+    + vnoise(vec3f(p.x * 0.9 + 41.0, p.y * 0.9 - 17.0, U2.a0.x * 0.03)) * 0.3;
+  let hueT = fract(hueField * 1.3 + U2.a3.x + p.z * 0.05);
+  var col = palette(hueT);
+  col = mix(col, vec3f(1.0, 0.86, 0.6), clamp(U2.a3.y, 0.0, 1.0) * 0.55);
+  let segAlpha = U2.a5.w * (0.7 + 0.5 * speedN);
+  let endAlpha = select(0.0, 1.0, isHead) * segAlpha;
+  out.color = vec4f(col * endAlpha, endAlpha);
+  return out;
+}
+
+@fragment
+fn fs_particle(in: VSOut) -> @location(0) vec4f {
+  return in.color;
+}
+
+// ---------------- fullscreen passes ----------------
+const fsPos = array<vec2f, 3>(
+  vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0)
+);
+
+struct FSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) uv: vec2f
+};
+
+@vertex
+fn vs_full(@builtin(vertex_index) vi: u32) -> FSOut {
+  var out: FSOut;
+  let p = fsPos[vi];
+  out.pos = vec4f(p, 0.0, 1.0);
+  out.uv = vec2f(p.x * 0.5 + 0.5, (1.0 - p.y) * 0.5);
+  return out;
+}
+
+@fragment
+fn fs_fade(in: FSOut) -> @location(0) vec4f {
+  let c = textureSample(srcTex, samp, in.uv);
+  return vec4f(c.rgb * U3.a5.x, 1.0);
+}
+
+@fragment
+fn fs_tonemap(in: FSOut) -> @location(0) vec4f {
+  let texSize = vec2f(textureDimensions(srcTex));
+  let texel = 1.0 / texSize;
+  var c = textureSample(srcTex, samp, in.uv).rgb;
+  var bloom = vec3f(0.0);
+  bloom += textureSample(srcTex, samp, in.uv + texel * vec2f(2.0, 0.0)).rgb;
+  bloom += textureSample(srcTex, samp, in.uv - texel * vec2f(2.0, 0.0)).rgb;
+  bloom += textureSample(srcTex, samp, in.uv + texel * vec2f(0.0, 2.0)).rgb;
+  bloom += textureSample(srcTex, samp, in.uv - texel * vec2f(0.0, 2.0)).rgb;
+  bloom += textureSample(srcTex, samp, in.uv + texel * vec2f(4.0, 4.0)).rgb;
+  bloom += textureSample(srcTex, samp, in.uv - texel * vec2f(4.0, 4.0)).rgb;
+  bloom *= (1.0 / 6.0);
+
+  // black-point lift: crush faint single-pass noise to true zero so only
+  // places where many filaments overlap/converge rise above the floor —
+  // this is what carves out the dark negative space between threads.
+  let blackPoint = 0.016;
+  var cc = max(c - vec3f(blackPoint), vec3f(0.0));
+  var bb = max(bloom - vec3f(blackPoint * 0.6), vec3f(0.0));
+  cc = cc + bb * U3.a5.z;
+
+  let aces = (cc * (2.51 * cc + 0.03)) / (cc * (2.43 * cc + 0.59) + 0.14);
+  var outc = pow(clamp(aces, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 1.9));
+
+  let centered = in.uv - vec2f(0.5, 0.5);
+  let vig = smoothstep(0.95, 0.2, length(centered * vec2f(1.0, texSize.y / texSize.x)) * 1.2);
+  outc *= mix(0.72, 1.0, vig);
+
+  return vec4f(outc, 1.0);
+}
+`;
+
+  // ---------------------------------------------------------------------
+  // scene (buffers, pipelines, render loop)
+  // ---------------------------------------------------------------------
+  function buildScene() {
+    var module = device.createShaderModule({ code: WGSL });
+
+    // storage buffers
+    var posData = new Float32Array(PARTICLE_COUNT * 4);
+    var velData = new Float32Array(PARTICLE_COUNT * 4);
+    for (var i = 0; i < PARTICLE_COUNT; i++) {
+      var o = i * 4;
+      posData[o + 0] = (Math.random() * 2 - 1) * 2.0;
+      posData[o + 1] = (Math.random() * 2 - 1) * 1.0;
+      posData[o + 2] = Math.random();
+      posData[o + 3] = Math.random() * 10.0;
+      velData[o + 0] = 0;
+      velData[o + 1] = 0;
+      velData[o + 2] = Math.random();
+      velData[o + 3] = 0;
+    }
+    var posBuf = device.createBuffer({
+      size: posData.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true
+    });
+    new Float32Array(posBuf.getMappedRange()).set(posData);
+    posBuf.unmap();
+
+    var velBuf = device.createBuffer({
+      size: velData.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true
+    });
+    new Float32Array(velBuf.getMappedRange()).set(velData);
+    velBuf.unmap();
+
+    var uniformBuf = device.createBuffer({
+      size: 96,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+
+    // compute pipeline
+    var computePipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: module, entryPoint: "cs_main" }
+    });
+    var computeBindGroup = device.createBindGroup({
+      layout: computePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuf } },
+        { binding: 1, resource: { buffer: posBuf } },
+        { binding: 2, resource: { buffer: velBuf } }
+      ]
+    });
+
+    // particle render pipeline (additive into HDR accum texture)
+    var particlePipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: module, entryPoint: "vs_particle" },
+      fragment: {
+        module: module,
+        entryPoint: "fs_particle",
+        targets: [{
+          format: "rgba16float",
+          blend: {
+            color: { srcFactor: "one", dstFactor: "one", operation: "add" },
+            alpha: { srcFactor: "one", dstFactor: "one", operation: "add" }
+          }
+        }]
+      },
+      primitive: { topology: "line-list" }
+    });
+    var particleBindGroup = device.createBindGroup({
+      layout: particlePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: posBuf } },
+        { binding: 1, resource: { buffer: velBuf } },
+        { binding: 2, resource: { buffer: uniformBuf } }
+      ]
+    });
+
+    var sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
+
+    var fadePipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: module, entryPoint: "vs_full" },
+      fragment: { module: module, entryPoint: "fs_fade", targets: [{ format: "rgba16float" }] },
+      primitive: { topology: "triangle-list" }
+    });
+
+    var tonemapPipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: module, entryPoint: "vs_full" },
+      fragment: { module: module, entryPoint: "fs_tonemap", targets: [{ format: presentationFormat }] },
+      primitive: { topology: "triangle-list" }
+    });
+
+    // ping-pong accumulation textures (recreated on resize)
+    var accumTex = [null, null];
+    var accumView = [null, null];
+    var fadeBindGroup = [null, null];
+    var tonemapBindGroup = [null, null];
+    var curIdx = 0;
+    var texW = 0, texH = 0;
+
+    function makeAccumTargets(w, h) {
+      for (var k = 0; k < 2; k++) {
+        if (accumTex[k]) accumTex[k].destroy();
+        accumTex[k] = device.createTexture({
+          size: [w, h],
+          format: "rgba16float",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+        });
+        accumView[k] = accumTex[k].createView();
+      }
+      for (var s = 0; s < 2; s++) {
+        fadeBindGroup[s] = device.createBindGroup({
+          layout: fadePipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: sampler },
+            { binding: 1, resource: accumView[s] },
+            { binding: 2, resource: { buffer: uniformBuf } }
+          ]
+        });
+        tonemapBindGroup[s] = device.createBindGroup({
+          layout: tonemapPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: sampler },
+            { binding: 1, resource: accumView[s] },
+            { binding: 2, resource: { buffer: uniformBuf } }
+          ]
+        });
+      }
+      texW = w; texH = h;
+      curIdx = 0;
+      // clear both
+      var enc = device.createCommandEncoder();
+      for (var c = 0; c < 2; c++) {
+        var pass = enc.beginRenderPass({
+          colorAttachments: [{ view: accumView[c], clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }]
+        });
+        pass.end();
+      }
+      device.queue.submit([enc.finish()]);
+    }
+
+    // ---------------- resize ----------------
+    var aspect = 1;
+    function resize() {
+      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      var w = Math.max(1, Math.round(window.innerWidth * dpr));
+      var h = Math.max(1, Math.round(window.innerHeight * dpr));
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+        makeAccumTargets(w, h);
+      }
+      aspect = w / h;
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    // -----------------------------------------------------------------
+    // audio
+    // -----------------------------------------------------------------
+    var audioEl = document.createElement("audio");
+    audioEl.preload = "auto";
+    audioEl.crossOrigin = "anonymous";
+    var audioCtx = null, analyser = null, mediaSource = null;
+    var freqData = null;
+    var isPlaying = false;
+    var currentTrack = 0;
+
+    function ensureGraph() {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.5;
+      freqData = new Uint8Array(analyser.frequencyBinCount);
+      mediaSource = audioCtx.createMediaElementSource(audioEl);
+      mediaSource.connect(analyser);
+      analyser.connect(audioCtx.destination);
+    }
+
+    function trackUrl(baseIndex, file) { return AUDIO_BASES[baseIndex] + file + ".mp3"; }
+
+    function setTrack(index, autoplay) {
+      currentTrack = index;
+      var file = TRACKS[index].file;
+      var baseIndex = 0;
+      var onErr2 = function () { setStatus("track failed to load: " + file); };
+      var onErr = function () {
+        baseIndex++;
+        if (baseIndex < AUDIO_BASES.length) {
+          audioEl.removeEventListener("error", onErr);
+          audioEl.src = trackUrl(baseIndex, file);
+          audioEl.addEventListener("error", onErr2, { once: true });
+          if (autoplay) audioEl.play().catch(function () {});
+        } else {
+          onErr2();
+        }
+      };
+      audioEl.addEventListener("error", onErr, { once: true });
+      audioEl.src = trackUrl(baseIndex, file);
+      audioEl.load();
+      if (autoplay) audioEl.play().catch(function () {});
+      updateNowPlaying();
+      trackPicker.value = String(index);
+    }
+
+    audioEl.addEventListener("ended", function () {
+      setTrack((currentTrack + 1) % TRACKS.length, true);
+      play();
+    });
+
+    function play() {
+      ensureGraph();
+      if (!audioEl.src) setTrack(currentTrack, false);
+      audioCtx.resume();
+      audioEl.play().then(function () {
+        isPlaying = true;
+        updatePlayIcon();
+        setStatus("playing — " + TRACKS[currentTrack].label);
+      }).catch(function (err) {
+        setStatus("playback blocked: " + err.message);
+      });
+    }
+    function pause() {
+      audioEl.pause();
+      isPlaying = false;
+      updatePlayIcon();
+      setStatus("paused");
+    }
+    function togglePlay() { if (isPlaying) pause(); else play(); }
+
+    // overlay / start
+    var started = false;
+    function startFromOverlay() {
+      if (started) return;
+      started = true;
+      overlay.classList.add("hidden");
+      document.getElementById("controls").style.display = "flex";
+      play();
+    }
+    overlay.addEventListener("click", startFromOverlay);
+    canvas.addEventListener("click", function () {
+      if (!started) { startFromOverlay(); return; }
+      togglePlay();
+    });
+
+    // controls UI
+    var trackPicker = document.getElementById("trackPicker");
+    TRACKS.forEach(function (t, i) {
+      var opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = t.label;
+      trackPicker.appendChild(opt);
+    });
+    trackPicker.addEventListener("change", function (e) {
+      e.stopPropagation();
+      ensureGraph();
+      setTrack(parseInt(trackPicker.value, 10), true);
+      if (!started) { started = true; overlay.classList.add("hidden"); document.getElementById("controls").style.display = "flex"; }
+      audioCtx.resume();
+      audioEl.play().then(function () {
+        isPlaying = true;
+        updatePlayIcon();
+        setStatus("playing — " + TRACKS[currentTrack].label);
+      }).catch(function (err) { setStatus("playback blocked: " + err.message); });
+    });
+
+    var playBtn = document.getElementById("playBtn");
+    var playIcon = document.getElementById("playIcon");
+    playBtn.addEventListener("click", function (e) { e.stopPropagation(); togglePlay(); });
+    function updatePlayIcon() {
+      playIcon.innerHTML = isPlaying
+        ? '<path d="M7 5h4v14H7zM13 5h4v14h-4z"></path>'
+        : '<path d="M8 5v14l11-7z"></path>';
+    }
+    var nowPlayingEl = document.getElementById("nowPlaying");
+    function updateNowPlaying() { nowPlayingEl.textContent = TRACKS[currentTrack].label; }
+    updateNowPlaying();
+
+    setTrack(0, false);
+
+    // ---------------- band envelopes + AGC + onset ----------------
+    var IDLE = { low: 0.14, mid: 0.12, high: 0.10, loud: 0.26 };
+    var low = IDLE.low, mid = IDLE.mid, high = IDLE.high, loud = IDLE.loud;
+    var lowPeak = 0.2, midPeak = 0.2, highPeak = 0.16, loudPeak = 0.22;
+    var centroid = 0.3, centroidPeak = 0.4;
+    var PEAK_DECAY = 0.9965;
+    var FLOOR = { low: 0.07, mid: 0.05, high: 0.035, loud: 0.05, centroid: 0.08 };
+    var lowN = 0, midN = 0, highN = 0, loudN = 0, centroidN = 0;
+    var loudBaseline = 0.1, onsetPulse = 0;
+    var hueShift = 0, fieldPhase = 0;
+    var burstX = 0, burstY = 0, burstStrength = 0;
+    var prevOnsetAbove = false;
+
+    function follow(prev, target, kUp, kDown) { var k = target > prev ? kUp : kDown; return prev + (target - prev) * k; }
+    function clamp01(v) { return Math.max(0, Math.min(1.3, v)); }
+
+    function updateAudio(dt) {
+      if (!analyser || !isPlaying) {
+        low = follow(low, IDLE.low, 0.01, 0.01);
+        mid = follow(mid, IDLE.mid, 0.01, 0.01);
+        high = follow(high, IDLE.high, 0.01, 0.01);
+        loud = follow(loud, IDLE.loud, 0.01, 0.01);
+        lowN = low; midN = mid; highN = high; loudN = loud; centroidN = 0.3;
+        return;
+      }
+      analyser.getByteFrequencyData(freqData);
+      var n = freqData.length;
+      var lowEnd = Math.max(1, Math.floor(n * 0.07));
+      var midEnd = Math.floor(n * 0.35);
+      var lowSum = 0, midSum = 0, highSum = 0, totalSum = 0, weighted = 0;
+      for (var i = 0; i < n; i++) {
+        var v = freqData[i];
+        if (i < lowEnd) lowSum += v; else if (i < midEnd) midSum += v; else highSum += v;
+        totalSum += v;
+        weighted += v * i;
+      }
+      var lowT = (lowSum / lowEnd) / 255;
+      var midT = (midSum / Math.max(1, midEnd - lowEnd)) / 255;
+      var highT = (highSum / Math.max(1, n - midEnd)) / 255;
+      var loudT = (totalSum / n) / 255;
+      var centroidT = totalSum > 0 ? (weighted / totalSum) / n : 0.3;
+
+      low = follow(low, lowT, 0.5, 0.06);
+      mid = follow(mid, midT, 0.5, 0.06);
+      high = follow(high, highT, 0.5, 0.06);
+      loud = follow(loud, loudT, 0.45, 0.05);
+      centroid = follow(centroid, centroidT, 0.3, 0.05);
+
+      lowPeak = Math.max(lowT, lowPeak * PEAK_DECAY);
+      midPeak = Math.max(midT, midPeak * PEAK_DECAY);
+      highPeak = Math.max(highT, highPeak * PEAK_DECAY);
+      loudPeak = Math.max(loudT, loudPeak * PEAK_DECAY);
+      centroidPeak = Math.max(centroidT, centroidPeak * PEAK_DECAY);
+
+      lowN = clamp01(low / Math.max(lowPeak, FLOOR.low));
+      midN = clamp01(mid / Math.max(midPeak, FLOOR.mid));
+      highN = clamp01(high / Math.max(highPeak, FLOOR.high));
+      loudN = clamp01(loud / Math.max(loudPeak, FLOOR.loud));
+      centroidN = clamp01(centroid / Math.max(centroidPeak, FLOOR.centroid));
+
+      // onset: broadband energy rising quickly above its slow baseline
+      loudBaseline += (loudT - loudBaseline) * 0.012;
+      var onsetRaw = Math.max(0, loudT - loudBaseline - 0.045);
+      var above = onsetRaw > 0.02;
+      onsetPulse = Math.max(onsetRaw * 3.6, onsetPulse * 0.85);
+      onsetPulse = Math.min(onsetPulse, 1.0);
+      if (above && !prevOnsetAbove) {
+        burstX = (Math.random() * 2 - 1) * (aspect + 0.1);
+        burstY = (Math.random() * 2 - 1) * 1.05;
+      }
+      prevOnsetAbove = above;
+      burstStrength = onsetPulse * 1.8;
+    }
+
+    // ---------------- perf adaptation ----------------
+    var frameTimes = [];
+    var lastAdaptCheck = 0;
+
+    // ---------------- uniform scratch ----------------
+    var uData = new Float32Array(24);
+
+    var startTime = performance.now();
+    var lastT = startTime;
+
+    function frame(now) {
+      var dtMs = now - lastT;
+      lastT = now;
+      var dt = Math.min(dtMs / 1000, 0.05);
+      var t = (now - startTime) / 1000;
+
+      fieldPhase += dt * 0.012;
+      updateAudio(dt);
+
+      frameTimes.push(dtMs);
+      if (frameTimes.length > 90) frameTimes.shift();
+      if (now - lastAdaptCheck > 2500 && frameTimes.length > 30) {
+        lastAdaptCheck = now;
+        var avg = frameTimes.reduce(function (a, b) { return a + b; }, 0) / frameTimes.length;
+        if (avg > 30 && activeCount > 40000) {
+          activeCount = Math.max(40000, Math.floor(activeCount * 0.8));
+        }
+      }
+
+      var flowScale = 0.4 + 0.25 * (1 - lowN);
+      var detail = Math.min(1, 0.03 + 0.3 * highN + 0.1 * centroidN);
+      var speed = 0.15 * (0.55 + 1.2 * loudN);
+      var timeScale = 0.07 * (0.6 + 1.0 * loudN) + 0.15 * highN;
+      hueShift = t * 0.012 + mid * 0.22 - low * 0.12 + high * 0.08;
+      var decay = 0.992 - 0.01 * loudN;
+      var pointSize = 0.0052;
+      var bloomAmt = 0.22 + 0.15 * loudN;
+      var segAlpha = 0.026 + 0.018 * loudN;
+
+      uData[0] = t; uData[1] = dt; uData[2] = aspect; uData[3] = activeCount;
+      uData[4] = lowN; uData[5] = midN; uData[6] = highN; uData[7] = loudN;
+      uData[8] = speed; uData[9] = timeScale; uData[10] = flowScale; uData[11] = detail;
+      uData[12] = hueShift; uData[13] = onsetPulse; uData[14] = 0; uData[15] = onsetPulse;
+      uData[16] = fieldPhase; uData[17] = burstX; uData[18] = burstY; uData[19] = burstStrength;
+      uData[20] = decay; uData[21] = pointSize; uData[22] = bloomAmt; uData[23] = segAlpha;
+      device.queue.writeBuffer(uniformBuf, 0, uData.buffer, uData.byteOffset, uData.byteLength);
+
+      var srcIdx = curIdx;
+      var dstIdx = 1 - curIdx;
+
+      var encoder = device.createCommandEncoder();
+
+      var cpass = encoder.beginComputePass();
+      cpass.setPipeline(computePipeline);
+      cpass.setBindGroup(0, computeBindGroup);
+      cpass.dispatchWorkgroups(Math.ceil(activeCount / 256));
+      cpass.end();
+
+      var rpass = encoder.beginRenderPass({
+        colorAttachments: [{ view: accumView[dstIdx], loadOp: "clear", clearValue: { r: 0, g: 0, b: 0, a: 1 }, storeOp: "store" }]
+      });
+      rpass.setPipeline(fadePipeline);
+      rpass.setBindGroup(0, fadeBindGroup[srcIdx]);
+      rpass.draw(3);
+      rpass.setPipeline(particlePipeline);
+      rpass.setBindGroup(0, particleBindGroup);
+      rpass.draw(activeCount * 2);
+      rpass.end();
+
+      var canvasView = context.getCurrentTexture().createView();
+      var tpass = encoder.beginRenderPass({
+        colorAttachments: [{ view: canvasView, loadOp: "clear", clearValue: { r: 0, g: 0, b: 0, a: 1 }, storeOp: "store" }]
+      });
+      tpass.setPipeline(tonemapPipeline);
+      tpass.setBindGroup(0, tonemapBindGroup[dstIdx]);
+      tpass.draw(3);
+      tpass.end();
+
+      device.queue.submit([encoder.finish()]);
+      curIdx = dstIdx;
+
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+
+    window.__viz = window.__viz || {};
+    window.__viz.getBands = function () { return { low: lowN, mid: midN, high: highN, loud: loudN, onset: onsetPulse }; };
+    window.__viz.isPlaying = function () { return isPlaying; };
+    window.__viz.currentTrack = function () { return TRACKS[currentTrack].label; };
+    window.__viz.particleCount = function () { return activeCount; };
+    window.__viz.getFreqSum = function () {
+      if (!freqData) return 0;
+      var s = 0; for (var i = 0; i < freqData.length; i++) s += freqData[i];
+      return s;
+    };
+    window.__viz.currentSrc = function () { return audioEl.currentSrc; };
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

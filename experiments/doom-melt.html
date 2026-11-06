@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Doom melt — experiments</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #0b0b0c;
+    color: #eee;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  a.back-link {
+    position: fixed;
+    top: 18px;
+    left: 20px;
+    color: #9a9a9a;
+    text-decoration: none;
+    font-size: 13px;
+    letter-spacing: .02em;
+    border: 1px solid #2a2a2e;
+    padding: 6px 12px;
+    border-radius: 2px;
+    transition: border-color .2s, color .2s, background .2s;
+    z-index: 10;
+  }
+  a.back-link:hover {
+    color: #eee;
+    border-color: #8a8a90;
+    background: #141416;
+  }
+  .stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+  }
+  #glcanvas {
+    display: block;
+    touch-action: none;
+    cursor: crosshair;
+    background: #000;
+    box-shadow: 0 0 0 1px #2a2a2e;
+  }
+  .caption {
+    margin: 0;
+    font-size: 12.5px;
+    letter-spacing: .03em;
+    color: #8a8a90;
+    text-align: center;
+    user-select: none;
+  }
+  .caption strong {
+    color: #b5b5b5;
+    font-weight: 600;
+  }
+  .fallback {
+    max-width: 30rem;
+    text-align: center;
+    color: #b5b5b5;
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 0 20px;
+  }
+</style>
+</head>
+<body>
+  <a class="back-link" href="/experiments/">&larr; experiments</a>
+  <div class="stage">
+    <canvas id="glcanvas"></canvas>
+    <p class="caption"><strong>Doom pixel-fall melt</strong> — hover to melt, leave to rise back</p>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("glcanvas");
+  var gl = canvas.getContext("webgl2", { antialias: true, preserveDrawingBuffer: false });
+
+  if (!gl) {
+    var stage = document.querySelector(".stage");
+    stage.innerHTML = '<p class="fallback">WebGL2 is not available in this browser, so the melt effect cannot run here.</p>';
+    return;
+  }
+
+  // ---------------------------------------------------------------------
+  // Shaders
+  // ---------------------------------------------------------------------
+
+  var VERT_SRC = [
+    "#version 300 es",
+    "in vec2 aPos;",
+    "out vec2 vUv;",
+    "void main() {",
+    "  vUv = vec2((aPos.x + 1.0) * 0.5, 1.0 - (aPos.y + 1.0) * 0.5);", // vUv.y = 0 at top
+    "  gl_Position = vec4(aPos, 0.0, 1.0);",
+    "}"
+  ].join("\n");
+
+  var FRAG_SRC = [
+    "#version 300 es",
+    "precision highp float;",
+    "in vec2 vUv;",
+    "out vec4 outColor;",
+    "",
+    "uniform vec2 uResolution;",
+    "uniform float uTime;",
+    "uniform float uHoverStartTime;",
+    "uniform float uLeaveTime;",
+    "uniform float uIsHovering;",
+    "uniform float uCursorX;",
+    "uniform vec2 uTopScale;",
+    "uniform vec2 uTopOffset;",
+    "uniform vec2 uBotScale;",
+    "uniform vec2 uBotOffset;",
+    "uniform sampler2D uTopTex;",
+    "uniform sampler2D uBotTex;",
+    "uniform sampler2D uDelayTex;",
+    "",
+    "const float NUM_COLUMNS = 128.0;",
+    "const float BASE_DELAY_SCALE = 0.30;",   // jaggedness from the random walk
+    "const float SPREAD_SCALE = 0.55;",        // melt spreads outward from the cursor
+    "const float ACCEL = 2.8;",                // gravity-ish acceleration of the fall
+    "const float MAX_OFFSET = 1.15;",
+    "const float RISE_DURATION = 0.55;",
+    "const float PIXEL_BLOCK = 6.0;",
+    "",
+    "float columnOffset(float col, out float totalDelay) {",
+    "  float colCenter = (col + 0.5) / NUM_COLUMNS;",
+    "  float baseDelay = texelFetch(uDelayTex, ivec2(int(col), 0), 0).r;", // 0..1 random-walk delay
+    "  float dist = abs(colCenter - uCursorX);",
+    "  totalDelay = baseDelay * BASE_DELAY_SCALE + dist * SPREAD_SCALE;",
+    "",
+    "  float offset;",
+    "  if (uIsHovering > 0.5) {",
+    "    float tt = max(0.0, (uTime - uHoverStartTime) - totalDelay);",
+    "    offset = clamp(0.5 * ACCEL * tt * tt, 0.0, MAX_OFFSET);",
+    "  } else {",
+    "    float ttAtLeave = max(0.0, (uLeaveTime - uHoverStartTime) - totalDelay);",
+    "    float offsetAtLeave = clamp(0.5 * ACCEL * ttAtLeave * ttAtLeave, 0.0, MAX_OFFSET);",
+    "    float tSinceLeave = max(0.0, (uTime - uLeaveTime) - totalDelay * 0.4);",
+    "    float p = clamp(tSinceLeave / RISE_DURATION, 0.0, 1.0);",
+    "    p = p * p * (3.0 - 2.0 * p);", // smoothstep ease
+    "    offset = offsetAtLeave * (1.0 - p);",
+    "  }",
+    "  return offset;",
+    "}",
+    "",
+    "void main() {",
+    "  float col = clamp(floor(vUv.x * NUM_COLUMNS), 0.0, NUM_COLUMNS - 1.0);",
+    "  float totalDelay;",
+    "  float offset = columnOffset(col, totalDelay);",
+    "",
+    "  float sourceY = vUv.y - offset;",
+    "  vec3 color;",
+    "",
+    "  if (sourceY < 0.0) {",
+    "    vec2 buv = vUv * uBotScale + uBotOffset;",
+    "    color = texture(uBotTex, buv).rgb;",
+    "  } else {",
+    "    vec2 tuv = vec2(vUv.x, sourceY);",
+    "",
+    "    float pixelateAmt = smoothstep(0.0, 0.04, offset);",
+    "    vec2 fragPx = gl_FragCoord.xy;",
+    "    float px = (floor(fragPx.x / PIXEL_BLOCK) + 0.5) * PIXEL_BLOCK;",
+    "    float py = (floor(sourceY * uResolution.y / PIXEL_BLOCK) + 0.5) * PIXEL_BLOCK;",
+    "    vec2 blockUv = vec2(px / uResolution.x, py / uResolution.y);",
+    "",
+    "    vec2 mixedUv = mix(tuv, blockUv, pixelateAmt);",
+    "    vec2 ttuv = mixedUv * uTopScale + uTopOffset;",
+    "    color = texture(uTopTex, ttuv).rgb;",
+    "  }",
+    "",
+    "  outColor = vec4(color, 1.0);",
+    "}"
+  ].join("\n");
+
+  function compileShader(type, src) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      var log = gl.getShaderInfoLog(sh);
+      gl.deleteShader(sh);
+      throw new Error("Shader compile error: " + log);
+    }
+    return sh;
+  }
+
+  var vertShader = compileShader(gl.VERTEX_SHADER, VERT_SRC);
+  var fragShader = compileShader(gl.FRAGMENT_SHADER, FRAG_SRC);
+  var program = gl.createProgram();
+  gl.attachShader(program, vertShader);
+  gl.attachShader(program, fragShader);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error("Program link error: " + gl.getProgramInfoLog(program));
+  }
+  gl.useProgram(program);
+
+  // ---------------------------------------------------------------------
+  // Fullscreen quad
+  // ---------------------------------------------------------------------
+
+  var quadVerts = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
+  var vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+  var vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  var aPosLoc = gl.getAttribLocation(program, "aPos");
+  gl.enableVertexAttribArray(aPosLoc);
+  gl.vertexAttribPointer(aPosLoc, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  // ---------------------------------------------------------------------
+  // Uniform locations
+  // ---------------------------------------------------------------------
+
+  var U = {};
+  [
+    "uResolution", "uTime", "uHoverStartTime", "uLeaveTime", "uIsHovering",
+    "uCursorX", "uTopScale", "uTopOffset", "uBotScale", "uBotOffset",
+    "uTopTex", "uBotTex", "uDelayTex"
+  ].forEach(function (name) {
+    U[name] = gl.getUniformLocation(program, name);
+  });
+
+  // ---------------------------------------------------------------------
+  // Delay texture: Doom-style random-walk column delays
+  // ---------------------------------------------------------------------
+
+  var NUM_COLUMNS = 128;
+
+  function makeDoomDelays(n) {
+    var y = new Float32Array(n);
+    var v = -(Math.random() * 16);
+    y[0] = v;
+    for (var i = 1; i < n; i++) {
+      var r = Math.floor(Math.random() * 3) - 1; // -1, 0, or 1
+      v += r;
+      if (v > 0) v = 0;
+      if (v < -15) v = -15;
+      y[i] = v;
+    }
+    // normalize: 0 (y=0, no extra delay) .. 1 (y=-15, max extra delay)
+    var out = new Float32Array(n);
+    for (var j = 0; j < n; j++) {
+      out[j] = -y[j] / 15;
+    }
+    return out;
+  }
+
+  var delayData = makeDoomDelays(NUM_COLUMNS);
+  var delayTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D, delayTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, NUM_COLUMNS, 1, 0, gl.RED, gl.FLOAT, delayData);
+
+  // ---------------------------------------------------------------------
+  // Image textures (top = portrait, bottom = revealed leaves)
+  // ---------------------------------------------------------------------
+
+  var topTex = gl.createTexture();
+  var botTex = gl.createTexture();
+  var topImgSize = { w: 1, h: 1 };
+  var botImgSize = { w: 1, h: 1 };
+  var texturesReady = { top: false, bot: false };
+
+  function setupTexture(tex, unit) {
+    gl.activeTexture(unit);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+
+  function loadImage(url, tex, unit, sizeOut, readyKey) {
+    var img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = function () {
+      setupTexture(tex, unit);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      sizeOut.w = img.naturalWidth;
+      sizeOut.h = img.naturalHeight;
+      texturesReady[readyKey] = true;
+      updateCoverUniforms();
+    };
+    img.onerror = function (e) {
+      console.error("Failed to load image", url, e);
+    };
+    img.src = url;
+  }
+
+  loadImage("/public/images/home-about.webp", topTex, gl.TEXTURE0, topImgSize, "top");
+  loadImage("/public/images/home-listen.webp", botTex, gl.TEXTURE1, botImgSize, "bot");
+
+  // ---------------------------------------------------------------------
+  // Cover-fit UV transforms, recomputed on resize / image load
+  // ---------------------------------------------------------------------
+
+  var topScale = [1, 1], topOffset = [0, 0];
+  var botScale = [1, 1], botOffset = [0, 0];
+
+  function computeCover(canvasW, canvasH, imgW, imgH) {
+    var s = Math.max(canvasW / imgW, canvasH / imgH);
+    var sx = canvasW / (imgW * s);
+    var sy = canvasH / (imgH * s);
+    return { scale: [sx, sy], offset: [0.5 * (1 - sx), 0.5 * (1 - sy)] };
+  }
+
+  function updateCoverUniforms() {
+    var w = canvas.width, h = canvas.height;
+    if (texturesReady.top) {
+      var t = computeCover(w, h, topImgSize.w, topImgSize.h);
+      topScale = t.scale; topOffset = t.offset;
+    }
+    if (texturesReady.bot) {
+      var b = computeCover(w, h, botImgSize.w, botImgSize.h);
+      botScale = b.scale; botOffset = b.offset;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Sizing: square-ish canvas, DPR aware
+  // ---------------------------------------------------------------------
+
+  function resize() {
+    var cssSize = Math.floor(Math.min(window.innerWidth * 0.9, window.innerHeight * 0.78));
+    cssSize = Math.max(cssSize, 200);
+    var dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    canvas.style.width = cssSize + "px";
+    canvas.style.height = cssSize + "px";
+    var pxSize = Math.round(cssSize * dpr);
+    if (canvas.width !== pxSize || canvas.height !== pxSize) {
+      canvas.width = pxSize;
+      canvas.height = pxSize;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      updateCoverUniforms();
+    }
+  }
+
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ---------------------------------------------------------------------
+  // Pointer interaction
+  // ---------------------------------------------------------------------
+
+  var isHovering = false;
+  var hoverStartTime = -1e6;
+  var leaveTime = -1e6;
+  var cursorX = 0.5;
+  var accumTime = 0;
+
+  function updateCursor(e) {
+    var rect = canvas.getBoundingClientRect();
+    var x = (e.clientX - rect.left) / rect.width;
+    cursorX = Math.min(1, Math.max(0, x));
+  }
+
+  function startHover(e) {
+    updateCursor(e);
+    if (!isHovering) {
+      isHovering = true;
+      hoverStartTime = accumTime;
+    }
+  }
+
+  function endHover() {
+    if (isHovering) {
+      isHovering = false;
+      leaveTime = accumTime;
+    }
+  }
+
+  canvas.addEventListener("pointerenter", startHover);
+  canvas.addEventListener("pointermove", function (e) {
+    if (isHovering) updateCursor(e);
+  });
+  canvas.addEventListener("pointerdown", startHover);
+  canvas.addEventListener("pointerleave", endHover);
+  canvas.addEventListener("pointerup", endHover);
+  canvas.addEventListener("pointercancel", endHover);
+
+  // ---------------------------------------------------------------------
+  // Render loop (time-based, pauses when tab hidden)
+  // ---------------------------------------------------------------------
+
+  gl.clearColor(0, 0, 0, 1);
+
+  var lastFrameTime = null;
+  var rafId = null;
+
+  function frame(now) {
+    if (lastFrameTime !== null) {
+      accumTime += (now - lastFrameTime) / 1000;
+    }
+    lastFrameTime = now;
+
+    gl.bindVertexArray(vao);
+    gl.useProgram(program);
+
+    gl.uniform2f(U.uResolution, canvas.width, canvas.height);
+    gl.uniform1f(U.uTime, accumTime);
+    gl.uniform1f(U.uHoverStartTime, hoverStartTime);
+    gl.uniform1f(U.uLeaveTime, leaveTime);
+    gl.uniform1f(U.uIsHovering, isHovering ? 1 : 0);
+    gl.uniform1f(U.uCursorX, cursorX);
+    gl.uniform2f(U.uTopScale, topScale[0], topScale[1]);
+    gl.uniform2f(U.uTopOffset, topOffset[0], topOffset[1]);
+    gl.uniform2f(U.uBotScale, botScale[0], botScale[1]);
+    gl.uniform2f(U.uBotOffset, botOffset[0], botOffset[1]);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, topTex);
+    gl.uniform1i(U.uTopTex, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, botTex);
+    gl.uniform1i(U.uBotTex, 1);
+
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, delayTex);
+    gl.uniform1i(U.uDelayTex, 2);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function start() {
+    if (rafId === null) {
+      lastFrameTime = null;
+      rafId = requestAnimationFrame(frame);
+    }
+  }
+
+  function stop() {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) stop(); else start();
+  });
+
+  start();
+})();
+</script>
+<script id="adina-context-guard">
+// Browsers cap the number of live WebGL contexts (~16) and drop the oldest when more tabs open one.
+// If that happens to this page, reload it the next time the tab is shown.
+(() => {
+  let lost = false;
+  document.addEventListener('webglcontextlost', (e) => { e.preventDefault(); lost = true; }, true);
+  const reloadIfLost = () => { if (lost && document.visibilityState === 'visible') location.reload(); };
+  document.addEventListener('visibilitychange', reloadIfLost);
+  window.addEventListener('focus', reloadIfLost);
+})();
+</script>
+</body>
+</html>

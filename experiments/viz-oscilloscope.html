@@ -1,0 +1,1097 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Vectorscope &amp; waterfall — audio-only visualizer</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #030304;
+    color: #d8e8da;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  body {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    touch-action: none;
+  }
+  canvas#gl {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: pointer;
+  }
+
+  .back-link {
+    position: fixed;
+    top: 14px;
+    left: 16px;
+    font-size: 12px;
+    letter-spacing: .02em;
+    color: #6f8a76;
+    text-decoration: none;
+    z-index: 30;
+    padding: 4px 2px;
+  }
+  .back-link:hover { color: #bfe6c6; }
+
+  /* instrument plaque: track title, upper right */
+  .plaque {
+    position: fixed;
+    top: 14px;
+    right: 16px;
+    z-index: 30;
+    text-align: right;
+    pointer-events: none;
+    max-width: 58vw;
+  }
+  .plaque .model {
+    font-size: 10px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: #4f6b57;
+    margin-bottom: 3px;
+  }
+  .plaque .title {
+    font-size: 13px;
+    letter-spacing: .03em;
+    color: #bfe6c6;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .plaque .state {
+    font-size: 10px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: #4f6b57;
+    margin-top: 3px;
+  }
+
+  /* bottom control strip */
+  .controls {
+    position: fixed;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 94vw;
+    background: rgba(5,8,6,0.55);
+    border: 1px solid #1c2820;
+    border-radius: 8px;
+    padding: 6px 8px;
+    backdrop-filter: blur(3px);
+  }
+  .ctrl-btn {
+    appearance: none;
+    background: transparent;
+    border: 1px solid #28382c;
+    color: #9fc2a6;
+    font-size: 13px;
+    width: 30px;
+    height: 28px;
+    line-height: 1;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+  }
+  .ctrl-btn:hover { border-color: #4f6b57; color: #d8f5dd; }
+  select#trackSelect {
+    appearance: none;
+    background: #0a0f0b;
+    border: 1px solid #28382c;
+    color: #bfe6c6;
+    font-size: 12px;
+    letter-spacing: .02em;
+    padding: 6px 10px;
+    border-radius: 6px;
+    max-width: 46vw;
+    cursor: pointer;
+  }
+  select#trackSelect:hover { border-color: #4f6b57; }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: rgba(2,4,3,0.62);
+    backdrop-filter: blur(2px);
+    cursor: pointer;
+    transition: opacity .6s ease;
+    z-index: 20;
+    text-align: center;
+    padding: 20px;
+  }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  .play-ring {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    border: 1px solid rgba(191,230,198,0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 22px rgba(120,255,150,0.18);
+  }
+  .play-ring svg { width: 18px; height: 18px; fill: #d8f5dd; margin-left: 3px; }
+  .overlay .label {
+    font-size: 13px;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: #d8f5dd;
+  }
+  .overlay .sub {
+    font-size: 12px;
+    color: #7fa088;
+    max-width: 26em;
+    line-height: 1.6;
+  }
+
+  .status {
+    position: fixed;
+    bottom: 14px;
+    left: 16px;
+    font-size: 10px;
+    color: #3f5546;
+    letter-spacing: .04em;
+    z-index: 30;
+    text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+
+  <a class="back-link" href="/experiments/">&larr; experiments</a>
+
+  <div class="plaque">
+    <div class="model">L&ndash;R vectorscope &middot; spectral waterfall</div>
+    <div class="title" id="plaqueTitle">&mdash;</div>
+    <div class="state" id="plaqueState">idle</div>
+  </div>
+
+  <canvas id="gl"></canvas>
+
+  <div class="overlay" id="overlay">
+    <div class="play-ring"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
+    <div class="label">click to begin</div>
+    <div class="sub">A phosphor beam traces the stereo field left/right while her spectrum recedes
+       into the distance behind it. Click the screen again to pause.</div>
+  </div>
+
+  <div class="controls">
+    <button class="ctrl-btn" id="prevBtn" title="previous track" type="button">&#8249;</button>
+    <button class="ctrl-btn" id="playBtn" title="play / pause" type="button">&#9654;</button>
+    <button class="ctrl-btn" id="nextBtn" title="next track" type="button">&#8250;</button>
+    <select id="trackSelect"></select>
+  </div>
+
+  <div class="status" id="status">idle</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ============================================================
+  // tracks
+  // ============================================================
+  var TRACKS = [
+    { file: "droplet",             label: "Droplet" },
+    { file: "arvegods",            label: "Arvegods" },
+    { file: "tystnadens-ro",       label: "Tystnadens ro" },
+    { file: "canis-major",         label: "Canis Major" },
+    { file: "scyphozoa",           label: "Scyphozoa" },
+    { file: "maxima-minima",       label: "Maxima Minima" },
+    { file: "kalis-daughters",     label: "Kali's Daughters" },
+    { file: "scen-v-1",            label: "Scen V (I)" },
+    { file: "scen-v-2",            label: "Scen V (II)" },
+    { file: "scen-v-3",            label: "Scen V (III)" },
+    { file: "emigrantvisa",        label: "Emigrantvisa" },
+    { file: "you-are-my-sunshine", label: "You're My Sunshine" },
+    { file: "zwampen",             label: "Zwampen" },
+    { file: "love-me-tender",      label: "Love Me Tender" }
+  ];
+  var AUDIO_BASES = ["/audio/", "/public/audio/"];
+
+  var statusEl = document.getElementById("status");
+  function setStatus(s) { statusEl.textContent = s; document.getElementById("plaqueState").textContent = s; }
+
+  // ============================================================
+  // constants
+  // ============================================================
+  var SCOPE_N = 2048;          // time-domain samples per channel
+  var SEG_N = SCOPE_N - 1;
+  var MONO_DELAY = 42;         // samples, delay-embedding for near-mono phase portrait
+
+  var WF_BINS = 100;           // log-frequency columns in the waterfall
+  var WF_ROWS = 140;           // ring-buffer depth (history frames)
+  var SPEC_FFT = 4096;
+
+  var AMP_TARGET = 0.82, AMP_FLOOR = 0.015, AMP_GAIN_MAX = 60, AMP_PEAK_DECAY = 0.9975;
+  var SPEC_FLOOR = 0.045, SPEC_GAIN_MAX = 14, SPEC_PEAK_DECAY = 0.996;
+  var INTEN_K = 0.75, INTEN_MIN = 0.025, INTEN_MAX = 0.46, INTEN_EPS = 1.7;
+
+  var PHOSPHOR = [0.42, 1.0, 0.5];
+  var WF_COLOR = [0.20, 0.62, 0.46];
+
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  // ============================================================
+  // canvas / GL
+  // ============================================================
+  var canvas = document.getElementById("gl");
+  var gl = canvas.getContext("webgl2", { antialias: false, alpha: false, premultipliedAlpha: false });
+  if (!gl) { setStatus("WebGL2 unavailable"); throw new Error("no webgl2"); }
+
+  function compile(src, type) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      var log = gl.getShaderInfoLog(sh);
+      gl.deleteShader(sh);
+      throw new Error("shader compile error: " + log + "\n" + src);
+    }
+    return sh;
+  }
+  function link(vsSrc, fsSrc) {
+    var vs = compile(vsSrc, gl.VERTEX_SHADER);
+    var fs = compile(fsSrc, gl.FRAGMENT_SHADER);
+    var p = gl.createProgram();
+    gl.attachShader(p, vs);
+    gl.attachShader(p, fs);
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      throw new Error("program link error: " + gl.getProgramInfoLog(p));
+    }
+    return p;
+  }
+  function uniforms(p, names) {
+    var u = {};
+    for (var i = 0; i < names.length; i++) u[names[i]] = gl.getUniformLocation(p, names[i]);
+    return u;
+  }
+
+  // ---------- shared fullscreen-triangle vertex shader ----------
+  var FS_VERT = [
+    "#version 300 es",
+    "out vec2 vUV;",
+    "void main() {",
+    "  vec2 pos = vec2((gl_VertexID == 2) ? 3.0 : -1.0, (gl_VertexID == 1) ? 3.0 : -1.0);",
+    "  vUV = pos * 0.5 + 0.5;",
+    "  gl_Position = vec4(pos, 0.0, 1.0);",
+    "}"
+  ].join("\n");
+
+  var emptyVAO = gl.createVertexArray(); // bound for all attribute-less draws
+
+  // ---------- decay pass (phosphor persistence fade) ----------
+  var decayFS = [
+    "#version 300 es",
+    "precision highp float;",
+    "in vec2 vUV;",
+    "uniform sampler2D uPrev;",
+    "uniform float uDecay;",
+    "out vec4 fragColor;",
+    "void main() {",
+    "  vec3 c = texture(uPrev, vUV).rgb * uDecay;",
+    "  c = max(c - vec3(0.0016), vec3(0.0));",
+    "  fragColor = vec4(c, 1.0);",
+    "}"
+  ].join("\n");
+  var progDecay = link(FS_VERT, decayFS);
+  var uDecay = uniforms(progDecay, ["uPrev", "uDecay"]);
+
+  // ---------- scope beam: instanced thick line segments (capsule SDF) ----------
+  var scopeVS = [
+    "#version 300 es",
+    "layout(location=0) in vec2 aCorner;",
+    "layout(location=1) in vec2 aP0;",
+    "layout(location=2) in vec2 aP1;",
+    "layout(location=3) in float aInten;",
+    "uniform vec2 uResolution;",
+    "uniform float uHalfThickness;",
+    "uniform float uPad;",
+    "out vec2 vLocal;",
+    "out float vIntensity;",
+    "out float vHalfLen;",
+    "out float vHalfThick;",
+    "void main() {",
+    "  vec2 p0 = (aP0 * 0.5 + 0.5) * uResolution;",
+    "  vec2 p1 = (aP1 * 0.5 + 0.5) * uResolution;",
+    "  vec2 d = p1 - p0;",
+    "  float len = length(d);",
+    "  vec2 tangent = len > 1e-5 ? d / len : vec2(1.0, 0.0);",
+    "  vec2 normal = vec2(-tangent.y, tangent.x);",
+    "  float halfLen = len * 0.5 + uPad;",
+    "  float halfThick = uHalfThickness + uPad;",
+    "  vec2 mid = (p0 + p1) * 0.5;",
+    "  vec2 offset = aCorner.x * halfLen * tangent + aCorner.y * halfThick * normal;",
+    "  vec2 fragPx = mid + offset;",
+    "  vLocal = aCorner * vec2(halfLen, halfThick);",
+    "  vHalfLen = len * 0.5;",
+    "  vHalfThick = uHalfThickness;",
+    "  vIntensity = aInten;",
+    "  vec2 ndc = (fragPx / uResolution) * 2.0 - 1.0;",
+    "  gl_Position = vec4(ndc, 0.0, 1.0);",
+    "}"
+  ].join("\n");
+  var scopeFS = [
+    "#version 300 es",
+    "precision highp float;",
+    "in vec2 vLocal;",
+    "in float vIntensity;",
+    "in float vHalfLen;",
+    "in float vHalfThick;",
+    "uniform vec3 uColor;",
+    "out vec4 fragColor;",
+    "void main() {",
+    "  float cx = clamp(vLocal.x, -vHalfLen, vHalfLen);",
+    "  float dist = length(vLocal - vec2(cx, 0.0));",
+    "  float alpha = 1.0 - smoothstep(vHalfThick * 0.5, vHalfThick + 1.3, dist);",
+    "  vec3 col = uColor * vIntensity * alpha;",
+    "  fragColor = vec4(col, alpha);",
+    "}"
+  ].join("\n");
+  var progScope = link(scopeVS, scopeFS);
+  var uScope = uniforms(progScope, ["uResolution", "uHalfThickness", "uPad", "uColor"]);
+
+  var scopeVAO = gl.createVertexArray();
+  gl.bindVertexArray(scopeVAO);
+  var cornerBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, cornerBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1, -1,  1, -1,  1, 1,
+    -1, -1,  1, 1,  -1, 1
+  ]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+  var instanceData = new Float32Array(SEG_N * 5);
+  var instanceBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, instanceData.byteLength, gl.DYNAMIC_DRAW);
+  var STRIDE = 5 * 4;
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, STRIDE, 0);
+  gl.vertexAttribDivisor(1, 1);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(2, 2, gl.FLOAT, false, STRIDE, 8);
+  gl.vertexAttribDivisor(2, 1);
+  gl.enableVertexAttribArray(3);
+  gl.vertexAttribPointer(3, 1, gl.FLOAT, false, STRIDE, 16);
+  gl.vertexAttribDivisor(3, 1);
+  gl.bindVertexArray(null);
+
+  // ---------- separable blur (bloom) ----------
+  var blurFS = [
+    "#version 300 es",
+    "precision highp float;",
+    "in vec2 vUV;",
+    "uniform sampler2D uTex;",
+    "uniform vec2 uTexel;",
+    "out vec4 fragColor;",
+    "void main() {",
+    "  vec3 sum = texture(uTex, vUV).rgb * 0.227027;",
+    "  vec2 o1 = uTexel * 1.3846153846;",
+    "  vec2 o2 = uTexel * 3.2307692308;",
+    "  sum += texture(uTex, vUV + o1).rgb * 0.3162162162;",
+    "  sum += texture(uTex, vUV - o1).rgb * 0.3162162162;",
+    "  sum += texture(uTex, vUV + o2).rgb * 0.0702702703;",
+    "  sum += texture(uTex, vUV - o2).rgb * 0.0702702703;",
+    "  fragColor = vec4(sum, 1.0);",
+    "}"
+  ].join("\n");
+  var progBlur = link(FS_VERT, blurFS);
+  var uBlur = uniforms(progBlur, ["uTex", "uTexel"]);
+
+  // ---------- waterfall (instanced receding line-strips) ----------
+  var waterfallVS = [
+    "#version 300 es",
+    "uniform mat4 uMVP;",
+    "uniform highp sampler2D uRing;",
+    "uniform int uWriteRow;",
+    "uniform float uDz;",
+    "uniform float uHeightScale;",
+    "uniform float uFogK;",
+    "out float vFog;",
+    "out float vMag;",
+    "void main() {",
+    "  int c = gl_VertexID;",
+    "  int rowOffset = gl_InstanceID;",
+    "  int actualRow = (uWriteRow - 1 - rowOffset + " + (WF_ROWS * 8) + ") % " + WF_ROWS + ";",
+    "  float mag = texelFetch(uRing, ivec2(c, actualRow), 0).r;",
+    "  float x = (float(c) / float(" + (WF_BINS - 1) + ") - 0.5) * 1.44;",
+    "  float z = -float(rowOffset) * uDz;",
+    "  float y = mag * uHeightScale - 0.32;",
+    "  gl_Position = uMVP * vec4(x, y, z, 1.0);",
+    "  vFog = exp(-float(rowOffset) * uFogK);",
+    "  vMag = mag;",
+    "}"
+  ].join("\n");
+  var waterfallFS = [
+    "#version 300 es",
+    "precision highp float;",
+    "in float vFog;",
+    "in float vMag;",
+    "uniform vec3 uColor;",
+    "out vec4 fragColor;",
+    "void main() {",
+    "  float base = 0.09;",
+    "  float brightness = (base + vMag * 1.5) * vFog;",
+    "  fragColor = vec4(uColor * brightness, 1.0);",
+    "}"
+  ].join("\n");
+  var progWaterfall = link(waterfallVS, waterfallFS);
+  var uWaterfall = uniforms(progWaterfall, ["uMVP", "uRing", "uWriteRow", "uDz", "uHeightScale", "uFogK", "uColor"]);
+
+  // ---------- additive composite of persist(sharp) + bloom(glow) ----------
+  var addFS = [
+    "#version 300 es",
+    "precision highp float;",
+    "in vec2 vUV;",
+    "uniform sampler2D uPersist;",
+    "uniform sampler2D uBloom;",
+    "uniform float uBloomStrength;",
+    "out vec4 fragColor;",
+    "void main() {",
+    "  vec3 sharp = texture(uPersist, vUV).rgb;",
+    "  vec3 glow = texture(uBloom, vUV).rgb * uBloomStrength;",
+    "  vec3 col = vec3(1.0) - (vec3(1.0) - sharp) * (vec3(1.0) - glow);",
+    "  fragColor = vec4(col, 1.0);",
+    "}"
+  ].join("\n");
+  var progAdd = link(FS_VERT, addFS);
+  var uAdd = uniforms(progAdd, ["uPersist", "uBloom", "uBloomStrength"]);
+
+  // ---------- final CRT post pass ----------
+  var finalFS = [
+    "#version 300 es",
+    "precision highp float;",
+    "in vec2 vUV;",
+    "uniform sampler2D uScene;",
+    "uniform vec2 uResolution;",
+    "uniform float uTime;",
+    "out vec4 fragColor;",
+    "vec2 curve(vec2 uv) {",
+    "  uv = uv * 2.0 - 1.0;",
+    "  vec2 offset = uv.yx * uv.yx * uv * 0.055;",
+    "  uv += offset;",
+    "  return uv * 0.5 + 0.5;",
+    "}",
+    "void main() {",
+    "  vec2 uv = curve(vUV);",
+    "  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { fragColor = vec4(0.0,0.0,0.0,1.0); return; }",
+    "  vec3 col = texture(uScene, uv).rgb;",
+    "  vec2 g = uv * 9.0;",
+    "  vec2 gridDist = abs(fract(g - 0.5) - 0.5);",
+    "  float gridLine = 1.0 - smoothstep(0.0, 0.02, min(gridDist.x, gridDist.y));",
+    "  col += gridLine * 0.016;",
+    "  vec2 cc = abs(uv - 0.5);",
+    "  float crossLine = 1.0 - smoothstep(0.0, 0.0018, min(cc.x, cc.y));",
+    "  col += crossLine * 0.028;",
+    "  float sl = sin(uv.y * uResolution.y * 3.14159265);",
+    "  col *= mix(1.0, 0.90, (sl * 0.5 + 0.5) * 0.3);",
+    "  float vig = smoothstep(0.98, 0.22, length(uv - 0.5));",
+    "  col *= mix(0.5, 1.0, vig);",
+    "  float n = fract(sin(dot(uv * uResolution.xy + uTime * 60.0, vec2(12.9898, 78.233))) * 43758.5453);",
+    "  col += (n - 0.5) * 0.012;",
+    "  fragColor = vec4(col, 1.0);",
+    "}"
+  ].join("\n");
+  var progFinal = link(FS_VERT, finalFS);
+  var uFinal = uniforms(progFinal, ["uScene", "uResolution", "uTime"]);
+
+  // ============================================================
+  // framebuffers
+  // ============================================================
+  function makeTex(w, h, internalFmt, fmt, type, filter) {
+    var t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, internalFmt, w, h);
+    return t;
+  }
+  function makeFBO(tex) {
+    var fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    return fbo;
+  }
+
+  var persistTex = [null, null], persistFBO = [null, null], persistCur = 0;
+  var bloomATex, bloomAFBO, bloomBTex, bloomBFBO;
+  var composeTex, composeFBO;
+  var fullW = 2, fullH = 2, halfW = 1, halfH = 1;
+
+  function destroyTargets() {
+    [persistTex[0], persistTex[1], bloomATex, bloomBTex, composeTex].forEach(function (t) { if (t) gl.deleteTexture(t); });
+    [persistFBO[0], persistFBO[1], bloomAFBO, bloomBFBO, composeFBO].forEach(function (f) { if (f) gl.deleteFramebuffer(f); });
+  }
+
+  function buildTargets(w, h) {
+    destroyTargets();
+    fullW = w; fullH = h;
+    halfW = Math.max(1, w >> 1); halfH = Math.max(1, h >> 1);
+
+    persistTex[0] = makeTex(fullW, fullH, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
+    persistFBO[0] = makeFBO(persistTex[0]);
+    gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    persistTex[1] = makeTex(fullW, fullH, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
+    persistFBO[1] = makeFBO(persistTex[1]);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    persistCur = 0;
+
+    bloomATex = makeTex(halfW, halfH, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
+    bloomAFBO = makeFBO(bloomATex);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    bloomBTex = makeTex(halfW, halfH, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
+    bloomBFBO = makeFBO(bloomBTex);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    composeTex = makeTex(fullW, fullH, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
+    composeFBO = makeFBO(composeTex);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // ---------- ring-buffer texture for the spectrum waterfall ----------
+  var ringTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, ringTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, WF_BINS, WF_ROWS);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, WF_BINS, WF_ROWS, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(WF_BINS * WF_ROWS));
+  var writeRow = 0;
+  var wfRowByte = new Uint8Array(WF_BINS);
+  var wfRowRaw = new Float32Array(WF_BINS);
+
+  // ============================================================
+  // waterfall camera (static; mat4 helpers, column-major)
+  // ============================================================
+  function mat4Perspective(fovy, aspect, near, far) {
+    var f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+    var m = new Float32Array(16);
+    m[0] = f / aspect; m[5] = f; m[10] = (far + near) * nf; m[11] = -1; m[14] = 2 * far * near * nf;
+    return m;
+  }
+  function mat4LookAt(eye, center, up) {
+    var z0 = eye[0] - center[0], z1 = eye[1] - center[1], z2 = eye[2] - center[2];
+    var len = 1 / Math.hypot(z0, z1, z2); z0 *= len; z1 *= len; z2 *= len;
+    var x0 = up[1] * z2 - up[2] * z1, x1 = up[2] * z0 - up[0] * z2, x2 = up[0] * z1 - up[1] * z0;
+    len = Math.hypot(x0, x1, x2); if (len > 1e-6) { len = 1 / len; x0 *= len; x1 *= len; x2 *= len; }
+    var y0 = z1 * x2 - z2 * x1, y1 = z2 * x0 - z0 * x2, y2 = z0 * x1 - z1 * x0;
+    var m = new Float32Array(16);
+    m[0] = x0; m[1] = y0; m[2] = z0; m[3] = 0;
+    m[4] = x1; m[5] = y1; m[6] = z1; m[7] = 0;
+    m[8] = x2; m[9] = y2; m[10] = z2; m[11] = 0;
+    m[12] = -(x0 * eye[0] + x1 * eye[1] + x2 * eye[2]);
+    m[13] = -(y0 * eye[0] + y1 * eye[1] + y2 * eye[2]);
+    m[14] = -(z0 * eye[0] + z1 * eye[1] + z2 * eye[2]);
+    m[15] = 1;
+    return m;
+  }
+  function mat4Mul(a, b) {
+    var out = new Float32Array(16);
+    for (var c = 0; c < 4; c++) {
+      for (var r = 0; r < 4; r++) {
+        out[c * 4 + r] = a[0 * 4 + r] * b[c * 4 + 0] + a[1 * 4 + r] * b[c * 4 + 1] +
+                          a[2 * 4 + r] * b[c * 4 + 2] + a[3 * 4 + r] * b[c * 4 + 3];
+      }
+    }
+    return out;
+  }
+  var viewMat = mat4LookAt([0, 0.95, 1.7], [0, -0.05, -1.1], [0, 1, 0]);
+  var mvp = new Float32Array(16);
+  function updateProjection() {
+    var aspect = fullW / fullH;
+    var proj = mat4Perspective(45 * Math.PI / 180, aspect, 0.05, 8.0);
+    mvp = mat4Mul(proj, viewMat);
+  }
+
+  // ============================================================
+  // resize
+  // ============================================================
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = Math.max(2, Math.round(window.innerWidth * dpr));
+    var h = Math.max(2, Math.round(window.innerHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      buildTargets(w, h);
+      updateProjection();
+    }
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ============================================================
+  // audio graph
+  // ============================================================
+  var audioEl = document.createElement("audio");
+  audioEl.preload = "auto";
+  audioEl.crossOrigin = "anonymous";
+
+  var audioCtx = null, analyserL = null, analyserR = null, analyserSpec = null, splitter = null, mediaSource = null;
+  var bufL, bufR, specBytes;
+  var binLo = null, binHi = null;
+  var isPlaying = false, started = false;
+  var currentTrack = 0;
+
+  function computeLogBins() {
+    var nyquist = audioCtx.sampleRate / 2;
+    var numFreqBins = analyserSpec.frequencyBinCount;
+    var fMin = 28, fMax = Math.min(nyquist * 0.92, 15500);
+    binLo = new Int32Array(WF_BINS);
+    binHi = new Int32Array(WF_BINS);
+    for (var j = 0; j < WF_BINS; j++) {
+      var t0 = j / WF_BINS, t1 = (j + 1) / WF_BINS;
+      var f0 = fMin * Math.pow(fMax / fMin, t0);
+      var f1 = fMin * Math.pow(fMax / fMin, t1);
+      var i0 = Math.max(0, Math.floor((f0 / nyquist) * numFreqBins));
+      var i1 = Math.min(numFreqBins - 1, Math.max(i0, Math.floor((f1 / nyquist) * numFreqBins)));
+      binLo[j] = i0; binHi[j] = i1;
+    }
+  }
+
+  function ensureGraph() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyserL = audioCtx.createAnalyser();
+    analyserR = audioCtx.createAnalyser();
+    analyserL.fftSize = SCOPE_N * 1; // SCOPE_N time-domain samples
+    analyserR.fftSize = SCOPE_N * 1;
+    analyserL.smoothingTimeConstant = 0;
+    analyserR.smoothingTimeConstant = 0;
+    analyserSpec = audioCtx.createAnalyser();
+    analyserSpec.fftSize = SPEC_FFT;
+    analyserSpec.smoothingTimeConstant = 0.62;
+
+    bufL = new Float32Array(analyserL.fftSize);
+    bufR = new Float32Array(analyserR.fftSize);
+    specBytes = new Uint8Array(analyserSpec.frequencyBinCount);
+
+    splitter = audioCtx.createChannelSplitter(2);
+    mediaSource = audioCtx.createMediaElementSource(audioEl);
+    mediaSource.connect(splitter);
+    splitter.connect(analyserL, 0);
+    splitter.connect(analyserR, 1);
+    mediaSource.connect(analyserSpec);
+    mediaSource.connect(audioCtx.destination);
+
+    computeLogBins();
+  }
+
+  function trackUrl(baseIndex, file) { return AUDIO_BASES[baseIndex] + file + ".mp3"; }
+
+  function setTrack(index, autoplay) {
+    currentTrack = index;
+    var file = TRACKS[index].file;
+    var baseIndex = 0;
+    function tryBase(b) {
+      audioEl.src = trackUrl(b, file);
+      audioEl.load();
+      if (autoplay) audioEl.play().catch(function () {});
+    }
+    var onErr = function () {
+      baseIndex++;
+      if (baseIndex < AUDIO_BASES.length) { tryBase(baseIndex); }
+      else { setStatus("track failed: " + file); }
+    };
+    audioEl.removeEventListener("error", onErr);
+    audioEl.addEventListener("error", onErr, { once: true });
+    tryBase(0);
+    document.getElementById("plaqueTitle").textContent = TRACKS[index].label;
+    trackSelect.value = String(index);
+  }
+
+  audioEl.addEventListener("ended", function () {
+    var next = (currentTrack + 1) % TRACKS.length;
+    setTrack(next, true);
+    isPlaying = true;
+    setStatus("playing — " + TRACKS[next].label);
+  });
+
+  function play() {
+    ensureGraph();
+    if (!audioEl.src) setTrack(currentTrack, false);
+    audioCtx.resume();
+    audioEl.play().then(function () {
+      isPlaying = true;
+      setStatus("playing — " + TRACKS[currentTrack].label);
+      document.getElementById("playBtn").innerHTML = "&#10073;&#10073;";
+    }).catch(function (err) {
+      setStatus("playback blocked: " + err.message);
+    });
+  }
+  function pause() {
+    audioEl.pause();
+    isPlaying = false;
+    setStatus("paused");
+    document.getElementById("playBtn").innerHTML = "&#9654;";
+  }
+  function togglePlay() { if (isPlaying) pause(); else play(); }
+
+  // ---------- overlay ----------
+  var overlay = document.getElementById("overlay");
+  function startFromOverlay() {
+    if (started) return;
+    started = true;
+    overlay.classList.add("hidden");
+    play();
+  }
+  overlay.addEventListener("click", startFromOverlay);
+  canvas.addEventListener("click", function () {
+    if (!started) { startFromOverlay(); return; }
+    togglePlay();
+  });
+
+  // ---------- controls ----------
+  var trackSelect = document.getElementById("trackSelect");
+  TRACKS.forEach(function (t, i) {
+    var opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = t.label;
+    trackSelect.appendChild(opt);
+  });
+  trackSelect.addEventListener("change", function (e) {
+    e.stopPropagation();
+    ensureGraph();
+    var i = parseInt(trackSelect.value, 10);
+    setTrack(i, true);
+    if (!started) { started = true; overlay.classList.add("hidden"); }
+    audioCtx.resume();
+    audioEl.play().then(function () {
+      isPlaying = true;
+      setStatus("playing — " + TRACKS[i].label);
+      document.getElementById("playBtn").innerHTML = "&#10073;&#10073;";
+    }).catch(function () {});
+  });
+  document.getElementById("playBtn").addEventListener("click", function (e) {
+    e.stopPropagation();
+    if (!started) { startFromOverlay(); return; }
+    togglePlay();
+  });
+  document.getElementById("prevBtn").addEventListener("click", function (e) {
+    e.stopPropagation();
+    ensureGraph();
+    var i = (currentTrack - 1 + TRACKS.length) % TRACKS.length;
+    setTrack(i, true);
+    if (!started) { started = true; overlay.classList.add("hidden"); }
+    audioCtx.resume();
+    audioEl.play().then(function () { isPlaying = true; setStatus("playing — " + TRACKS[i].label); }).catch(function () {});
+  });
+  document.getElementById("nextBtn").addEventListener("click", function (e) {
+    e.stopPropagation();
+    ensureGraph();
+    var i = (currentTrack + 1) % TRACKS.length;
+    setTrack(i, true);
+    if (!started) { started = true; overlay.classList.add("hidden"); }
+    audioCtx.resume();
+    audioEl.play().then(function () { isPlaying = true; setStatus("playing — " + TRACKS[i].label); }).catch(function () {});
+  });
+  window.addEventListener("keydown", function (e) {
+    if (e.code === "Space") { e.preventDefault(); if (!started) startFromOverlay(); else togglePlay(); }
+    else if (e.code === "ArrowRight") { document.getElementById("nextBtn").click(); }
+    else if (e.code === "ArrowLeft") { document.getElementById("prevBtn").click(); }
+  });
+
+  document.getElementById("plaqueTitle").textContent = TRACKS[0].label;
+  trackSelect.value = "0";
+  setTrack(0, false);
+
+  // ============================================================
+  // per-frame audio -> geometry
+  // ============================================================
+  var ampPeak = AMP_FLOOR;
+  var specPeak = SPEC_FLOOR;
+  var monoBlend = 0;
+  var segCount = 0;
+  var lastMonoRatio = 0;
+
+  function buildScopeFromBuffers() {
+    analyserL.getFloatTimeDomainData(bufL);
+    analyserR.getFloatTimeDomainData(bufR);
+
+    var maxAbs = 0, diffSum = 0, sumSum = 0;
+    for (var i = 0; i < SCOPE_N; i++) {
+      var l = bufL[i], r = bufR[i];
+      var a = l < 0 ? -l : l, b = r < 0 ? -r : r;
+      if (a > maxAbs) maxAbs = a;
+      if (b > maxAbs) maxAbs = b;
+      diffSum += Math.abs(l - r);
+      sumSum += a + b;
+    }
+    ampPeak = Math.max(maxAbs, ampPeak * AMP_PEAK_DECAY);
+    var ampGain = Math.min(AMP_TARGET / Math.max(ampPeak, AMP_FLOOR), AMP_GAIN_MAX);
+
+    var diffRatio = diffSum / Math.max(sumSum, 1e-6);
+    lastMonoRatio = 1 - diffRatio;
+    var monoTarget = clamp((lastMonoRatio - 0.80) / 0.18, 0, 1);
+    monoBlend += (monoTarget - monoBlend) * 0.01;
+
+    var halfResX = fullW * 0.5, halfResY = fullH * 0.5;
+    var prevX = 0, prevY = 0, havePrev = false;
+    segCount = 0;
+    for (var i2 = 0; i2 < SCOPE_N; i2++) {
+      var l2 = bufL[i2] * ampGain;
+      var r2 = bufR[i2] * ampGain;
+      var di = i2 + MONO_DELAY < SCOPE_N ? i2 + MONO_DELAY : SCOPE_N - 1;
+      var s2 = (bufL[i2] + bufR[i2]) * 0.5 * ampGain;
+      var m2 = (bufL[di] + bufR[di]) * 0.5 * ampGain;
+      var x = l2 * (1 - monoBlend) + s2 * monoBlend;
+      var y = r2 * (1 - monoBlend) + m2 * monoBlend;
+      x = clamp(x, -1.3, 1.3);
+      y = clamp(y, -1.3, 1.3);
+      if (havePrev) {
+        var dxp = (x - prevX) * halfResX, dyp = (y - prevY) * halfResY;
+        var segLen = Math.sqrt(dxp * dxp + dyp * dyp);
+        var inten = clamp(INTEN_K / (segLen + INTEN_EPS), INTEN_MIN, INTEN_MAX);
+        var o = segCount * 5;
+        instanceData[o] = prevX; instanceData[o + 1] = prevY;
+        instanceData[o + 2] = x; instanceData[o + 3] = y;
+        instanceData[o + 4] = inten;
+        segCount++;
+      }
+      prevX = x; prevY = y; havePrev = true;
+    }
+  }
+
+  var idleT = 0;
+  function buildScopeIdle(dt) {
+    idleT += dt;
+    var halfResX = fullW * 0.5, halfResY = fullH * 0.5;
+    var prevX = 0, prevY = 0, havePrev = false;
+    segCount = 0;
+    var N = 160;
+    for (var i = 0; i < N; i++) {
+      var a = (i / N) * Math.PI * 2;
+      var wob = Math.sin(idleT * 0.25) * 0.015;
+      var x = Math.cos(a) * (0.045 + wob);
+      var y = Math.sin(a * 1.0) * (0.045 - wob) * Math.cos(idleT * 0.1);
+      if (havePrev) {
+        var dxp = (x - prevX) * halfResX, dyp = (y - prevY) * halfResY;
+        var segLen = Math.sqrt(dxp * dxp + dyp * dyp);
+        var inten = clamp(INTEN_K / (segLen + INTEN_EPS), INTEN_MIN, INTEN_MAX) * 0.4;
+        var o = segCount * 5;
+        instanceData[o] = prevX; instanceData[o + 1] = prevY;
+        instanceData[o + 2] = x; instanceData[o + 3] = y;
+        instanceData[o + 4] = inten;
+        segCount++;
+      }
+      prevX = x; prevY = y; havePrev = true;
+    }
+  }
+
+  function updateSpectrumRing() {
+    analyserSpec.getByteFrequencyData(specBytes);
+    var maxVal = 0;
+    for (var j = 0; j < WF_BINS; j++) {
+      var lo = binLo[j], hi = binHi[j];
+      var sum = 0, cnt = 0;
+      for (var k = lo; k <= hi; k++) { sum += specBytes[k]; cnt++; }
+      var v = cnt ? (sum / cnt) / 255 : 0;
+      wfRowRaw[j] = v;
+      if (v > maxVal) maxVal = v;
+    }
+    specPeak = Math.max(maxVal, specPeak * SPEC_PEAK_DECAY);
+    var gain = Math.min(1 / Math.max(specPeak, SPEC_FLOOR), SPEC_GAIN_MAX);
+    for (var j2 = 0; j2 < WF_BINS; j2++) {
+      wfRowByte[j2] = Math.round(clamp(wfRowRaw[j2] * gain, 0, 1) * 255);
+    }
+    gl.bindTexture(gl.TEXTURE_2D, ringTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, writeRow, WF_BINS, 1, gl.RED, gl.UNSIGNED_BYTE, wfRowByte);
+    writeRow = (writeRow + 1) % WF_ROWS;
+  }
+
+  // ============================================================
+  // render loop
+  // ============================================================
+  var lastT = performance.now();
+  var startTime = lastT;
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+
+  function frame(now) {
+    var dt = Math.min(0.05, (now - lastT) / 1000);
+    lastT = now;
+    var t = (now - startTime) / 1000;
+
+    if (isPlaying && started) {
+      buildScopeFromBuffers();
+      updateSpectrumRing();
+    } else if (!started) {
+      buildScopeIdle(dt);
+    } else {
+      segCount = 0; // paused: inject no new beam energy, let it decay
+    }
+
+    // ---- 1. decay + draw scope into persist[next] ----
+    var prevIdx = persistCur, nextIdx = 1 - persistCur;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, persistFBO[nextIdx]);
+    gl.viewport(0, 0, fullW, fullH);
+    gl.disable(gl.BLEND);
+    gl.useProgram(progDecay);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, persistTex[prevIdx]);
+    gl.uniform1i(uDecay.uPrev, 0);
+    gl.uniform1f(uDecay.uDecay, 0.865);
+    gl.bindVertexArray(emptyVAO);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    if (segCount > 0) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR); // "screen" blend: converges toward white, never clips harshly
+      gl.useProgram(progScope);
+      gl.bindVertexArray(scopeVAO);
+      gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, instanceData.subarray(0, segCount * 5));
+      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      gl.uniform2f(uScope.uResolution, fullW, fullH);
+      gl.uniform1f(uScope.uHalfThickness, 1.25 * dpr);
+      gl.uniform1f(uScope.uPad, 1.4 * dpr);
+      gl.uniform3f(uScope.uColor, PHOSPHOR[0], PHOSPHOR[1], PHOSPHOR[2]);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, segCount);
+      gl.disable(gl.BLEND);
+    }
+    persistCur = nextIdx;
+
+    // ---- 2. bloom (downsample + separable blur) ----
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomAFBO);
+    gl.viewport(0, 0, halfW, halfH);
+    gl.useProgram(progBlur);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, persistTex[persistCur]);
+    gl.uniform1i(uBlur.uTex, 0);
+    gl.uniform2f(uBlur.uTexel, 1.4 / fullW, 0);
+    gl.bindVertexArray(emptyVAO);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomBFBO);
+    gl.viewport(0, 0, halfW, halfH);
+    gl.bindTexture(gl.TEXTURE_2D, bloomATex);
+    gl.uniform2f(uBlur.uTexel, 0, 1.4 / fullH);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // ---- 3. compose: clear, waterfall, then additive scope+bloom ----
+    gl.bindFramebuffer(gl.FRAMEBUFFER, composeFBO);
+    gl.viewport(0, 0, fullW, fullH);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0.004, 0.006, 0.006, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.useProgram(progWaterfall);
+    gl.bindVertexArray(emptyVAO);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, ringTex);
+    gl.uniform1i(uWaterfall.uRing, 0);
+    gl.uniform1i(uWaterfall.uWriteRow, writeRow);
+    gl.uniform1f(uWaterfall.uDz, 0.027);
+    gl.uniform1f(uWaterfall.uHeightScale, 0.85);
+    gl.uniform1f(uWaterfall.uFogK, 0.028);
+    gl.uniform3f(uWaterfall.uColor, WF_COLOR[0], WF_COLOR[1], WF_COLOR[2]);
+    gl.uniformMatrix4fv(uWaterfall.uMVP, false, mvp);
+    gl.drawArraysInstanced(gl.LINE_STRIP, 0, WF_BINS, WF_ROWS);
+
+    gl.useProgram(progAdd);
+    gl.bindVertexArray(emptyVAO);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, persistTex[persistCur]);
+    gl.uniform1i(uAdd.uPersist, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, bloomBTex);
+    gl.uniform1i(uAdd.uBloom, 1);
+    gl.uniform1f(uAdd.uBloomStrength, 0.55);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.disable(gl.BLEND);
+
+    // ---- 4. final CRT pass to screen ----
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(progFinal);
+    gl.bindVertexArray(emptyVAO);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, composeTex);
+    gl.uniform1i(uFinal.uScene, 0);
+    gl.uniform2f(uFinal.uResolution, fullW, fullH);
+    gl.uniform1f(uFinal.uTime, t);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---------- debug / automated-check API ----------
+  window.__scopeViz = {
+    isPlaying: function () { return isPlaying; },
+    currentTrack: function () { return TRACKS[currentTrack].label; },
+    currentSrc: function () { return audioEl.currentSrc; },
+    monoRatio: function () { return lastMonoRatio; },
+    monoBlend: function () { return monoBlend; },
+    ampPeak: function () { return ampPeak; },
+    specPeak: function () { return specPeak; },
+    segCount: function () { return segCount; },
+    wfRow: function () { return Array.from(wfRowByte); },
+    writeRow: function () { return writeRow; },
+    specRaw: function () {
+      if (!analyserSpec) return null;
+      analyserSpec.getByteFrequencyData(specBytes);
+      var sum = 0, max = 0;
+      for (var i = 0; i < specBytes.length; i++) { sum += specBytes[i]; if (specBytes[i] > max) max = specBytes[i]; }
+      return { len: specBytes.length, sum: sum, max: max, sample: Array.prototype.slice.call(specBytes, 0, 20),
+               binLo: binLo ? Array.from(binLo.subarray(0, 10)) : null, binHi: binHi ? Array.from(binHi.subarray(0, 10)) : null,
+               sampleRate: audioCtx ? audioCtx.sampleRate : null };
+    },
+    sampleLR: function () {
+      if (!bufL || !bufR) return null;
+      analyserL.getFloatTimeDomainData(bufL);
+      analyserR.getFloatTimeDomainData(bufR);
+      return { l: Array.prototype.slice.call(bufL, 0, 8), r: Array.prototype.slice.call(bufR, 0, 8) };
+    }
+  };
+})();
+</script>
+<script id="adina-context-guard">
+// Browsers cap the number of live WebGL contexts (~16) and drop the oldest when more tabs open one.
+// If that happens to this page, reload it the next time the tab is shown.
+(() => {
+  let lost = false;
+  document.addEventListener('webglcontextlost', (e) => { e.preventDefault(); lost = true; }, true);
+  const reloadIfLost = () => { if (lost && document.visibilityState === 'visible') location.reload(); };
+  document.addEventListener('visibilitychange', reloadIfLost);
+  window.addEventListener('focus', reloadIfLost);
+})();
+</script>
+</body>
+</html>

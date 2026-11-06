@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Reaction–Diffusion Portrait — experiment</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #05070a;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  }
+  #c {
+    display: block;
+    width: min(90vw, 90vh);
+    height: min(90vw, 90vh);
+    border-radius: 6px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.04);
+    touch-action: none;
+    cursor: crosshair;
+    background: #0a0d12;
+  }
+  .back {
+    position: fixed;
+    top: 18px;
+    left: 20px;
+    color: rgba(235,238,245,.55);
+    text-decoration: none;
+    font-size: 13px;
+    letter-spacing: .02em;
+    transition: color .2s ease;
+  }
+  .back:hover { color: rgba(235,238,245,.95); }
+  .caption {
+    position: fixed;
+    bottom: 20px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    color: rgba(235,238,245,.6);
+    font-size: 13px;
+    letter-spacing: .02em;
+    pointer-events: none;
+  }
+  .caption .hint { color: rgba(235,238,245,.35); }
+  .msg {
+    max-width: 460px;
+    margin: 0 20px;
+    text-align: center;
+    color: rgba(235,238,245,.8);
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  .msg b { color: #fff; }
+</style>
+</head>
+<body>
+  <a class="back" href="/experiments/">&larr; experiments</a>
+  <canvas id="c"></canvas>
+  <div class="caption" id="caption">Reaction&ndash;Diffusion Portrait <span class="hint">&mdash; drag to paint &middot; double-click to reset</span></div>
+  <div class="msg" id="msg" hidden></div>
+
+<script type="module">
+const SIM_SIZE = 512;
+const ITERATIONS_PER_FRAME = 14;
+const IMAGE_PATH = "/public/images/home-about.webp";
+
+const canvasEl = document.getElementById("c");
+const msgEl = document.getElementById("msg");
+const captionEl = document.getElementById("caption");
+
+function showMessage(html) {
+  canvasEl.hidden = true;
+  canvasEl.style.display = "none";
+  captionEl.hidden = true;
+  msgEl.hidden = false;
+  msgEl.innerHTML = html;
+}
+
+async function main() {
+  if (!("gpu" in navigator)) {
+    showMessage("This experiment needs <b>WebGPU</b>, which your browser doesn't expose. Try a recent Chrome or Edge (desktop), or Safari Technology Preview with WebGPU enabled.");
+    return;
+  }
+
+  let adapter, device;
+  try {
+    adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) throw new Error("no adapter");
+    device = await adapter.requestDevice();
+  } catch (err) {
+    showMessage("WebGPU is present but couldn't start (" + (err && err.message ? err.message : "unknown error") + "). Try updating your graphics drivers or using a recent desktop Chrome/Edge.");
+    return;
+  }
+
+  device.addEventListener("uncapturederror", (ev) => {
+    console.error("WebGPU uncaptured error:", ev.error.message);
+  });
+  device.lost.then((info) => {
+    console.error("WebGPU device lost:", info.message);
+  });
+
+  const context = canvasEl.getContext("webgpu");
+  const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+  context.configure({ device, format: presentationFormat, alphaMode: "opaque" });
+
+  // ---- load the portrait -------------------------------------------------
+  const resp = await fetch(IMAGE_PATH);
+  const blob = await resp.blob();
+  const bitmap = await createImageBitmap(blob);
+
+  const photoTex = device.createTexture({
+    size: [bitmap.width, bitmap.height, 1],
+    format: "rgba8unorm",
+    usage:
+      GPUTextureUsage.TEXTURE_BINDING |
+      GPUTextureUsage.COPY_DST |
+      GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  device.queue.copyExternalImageToTexture(
+    { source: bitmap },
+    { texture: photoTex },
+    [bitmap.width, bitmap.height]
+  );
+
+  const linearSampler = device.createSampler({
+    magFilter: "linear",
+    minFilter: "linear",
+    addressModeU: "clamp-to-edge",
+    addressModeV: "clamp-to-edge",
+  });
+
+  // ---- sim resources ------------------------------------------------------
+  const stateFormat = "rgba16float";
+  function makeStateTexture() {
+    return device.createTexture({
+      size: [SIM_SIZE, SIM_SIZE, 1],
+      format: stateFormat,
+      usage:
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.STORAGE_BINDING |
+        GPUTextureUsage.COPY_DST,
+    });
+  }
+  const stateTexA = makeStateTexture();
+  const stateTexB = makeStateTexture();
+  const paramsTex = device.createTexture({
+    size: [SIM_SIZE, SIM_SIZE, 1],
+    format: stateFormat,
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+  });
+
+  const uniformBuffer = device.createBuffer({
+    size: 32, // 8 x f32
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  // ---- shaders --------------------------------------------------------
+  const commonWGSL = `
+    fn hash(p: vec2f) -> f32 {
+      return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453123);
+    }
+  `;
+
+  const initParamsModule = device.createShaderModule({
+    label: "init-params",
+    code: `
+      ${commonWGSL}
+      @group(0) @binding(0) var photoTex: texture_2d<f32>;
+      @group(0) @binding(1) var photoSmp: sampler;
+      @group(0) @binding(2) var outTex: texture_storage_2d<${stateFormat}, write>;
+
+      fn luminance(c: vec4f) -> f32 {
+        return dot(c.rgb, vec3f(0.299, 0.587, 0.114));
+      }
+
+      @compute @workgroup_size(8, 8)
+      fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+        let dims = textureDimensions(outTex);
+        if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+        let uv = (vec2f(gid.xy) + 0.5) / vec2f(dims);
+        let texel = 3.0 / vec2f(textureDimensions(photoTex, 0));
+
+        let tl = luminance(textureSampleLevel(photoTex, photoSmp, uv + vec2f(-texel.x, -texel.y), 0.0));
+        let tc = luminance(textureSampleLevel(photoTex, photoSmp, uv + vec2f(0.0, -texel.y), 0.0));
+        let tr = luminance(textureSampleLevel(photoTex, photoSmp, uv + vec2f(texel.x, -texel.y), 0.0));
+        let ml = luminance(textureSampleLevel(photoTex, photoSmp, uv + vec2f(-texel.x, 0.0), 0.0));
+        let mc = luminance(textureSampleLevel(photoTex, photoSmp, uv, 0.0));
+        let mr = luminance(textureSampleLevel(photoTex, photoSmp, uv + vec2f(texel.x, 0.0), 0.0));
+        let bl = luminance(textureSampleLevel(photoTex, photoSmp, uv + vec2f(-texel.x, texel.y), 0.0));
+        let bc = luminance(textureSampleLevel(photoTex, photoSmp, uv + vec2f(0.0, texel.y), 0.0));
+        let br = luminance(textureSampleLevel(photoTex, photoSmp, uv + vec2f(texel.x, texel.y), 0.0));
+
+        let gx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+        let gy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+        let edge = clamp(length(vec2f(gx, gy)) * 1.6, 0.0, 1.0);
+
+        let lum = mc;
+
+        // Piecewise path through verified-stable Gray-Scott (feed, kill) pairs
+        // (checked offline against this exact stencil/dt for long-run survival):
+        // dark (hair, curtain shadow) -> spirals/thread-like; mid -> spots/mitosis-like;
+        // bright (skin highlights) -> coral/worms-like.
+        var fk = vec2f(0.0545, 0.062);
+        if (lum < 0.25) {
+          fk = mix(vec2f(0.018, 0.051), vec2f(0.022, 0.052), lum / 0.25);
+        } else if (lum < 0.5) {
+          fk = mix(vec2f(0.022, 0.052), vec2f(0.039, 0.060), (lum - 0.25) / 0.25);
+        } else if (lum < 0.75) {
+          fk = mix(vec2f(0.039, 0.060), vec2f(0.0545, 0.062), (lum - 0.5) / 0.25);
+        } else {
+          fk = mix(vec2f(0.0545, 0.062), vec2f(0.060, 0.062), (lum - 0.75) / 0.25);
+        }
+        var feed = fk.x - edge * 0.003;
+        var kill = fk.y + edge * 0.0015;
+        feed = clamp(feed, 0.012, 0.065);
+        kill = clamp(kill, 0.048, 0.066);
+
+        textureStore(outTex, vec2<i32>(gid.xy), vec4f(feed, kill, edge, lum));
+      }
+    `,
+  });
+
+  const initStateModule = device.createShaderModule({
+    label: "init-state",
+    code: `
+      ${commonWGSL}
+      @group(0) @binding(0) var outTex: texture_storage_2d<${stateFormat}, write>;
+
+      @compute @workgroup_size(8, 8)
+      fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+        let dims = textureDimensions(outTex);
+        if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+
+        // Scatter small seed blobs (one per jittered grid cell). Isolated single-pixel
+        // seeds die instantly under diffusion before the reaction can take hold, so
+        // every nucleation site needs a few pixels of radius to survive and grow.
+        let cellSize = 22.0;
+        let radius = 3.0;
+        let p = vec2f(gid.xy);
+        let cellId = floor(p / cellSize);
+        let jx = hash(cellId);
+        let jy = hash(cellId + vec2f(91.7, 23.3));
+        let blobCenter = cellId * cellSize + vec2f(jx, jy) * (cellSize - 2.0 * radius) + radius;
+
+        var u = 1.0;
+        var v = 0.0;
+        if (distance(p, blobCenter) < radius) {
+          v = 0.55;
+          u = 0.25;
+        }
+        textureStore(outTex, vec2<i32>(gid.xy), vec4f(u, v, 0.0, 1.0));
+      }
+    `,
+  });
+
+  const updateModule = device.createShaderModule({
+    label: "update",
+    code: `
+      ${commonWGSL}
+      struct SimParams {
+        time: f32,
+        dt: f32,
+        mouseX: f32,
+        mouseY: f32,
+        mouseDown: f32,
+        mouseRadius: f32,
+        simW: f32,
+        simH: f32,
+      };
+
+      @group(0) @binding(0) var srcTex: texture_2d<f32>;
+      @group(0) @binding(1) var dstTex: texture_storage_2d<${stateFormat}, write>;
+      @group(0) @binding(2) var paramsTex: texture_2d<f32>;
+      @group(0) @binding(3) var<uniform> params: SimParams;
+
+      const KW = array<f32, 9>(0.05, 0.2, 0.05, 0.2, -1.0, 0.2, 0.05, 0.2, 0.05);
+
+      @compute @workgroup_size(8, 8)
+      fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+        let dims = textureDimensions(srcTex);
+        if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+        let w = i32(dims.x);
+        let h = i32(dims.y);
+        let x = i32(gid.x);
+        let y = i32(gid.y);
+
+        var lapU = 0.0;
+        var lapV = 0.0;
+        for (var dy = -1; dy <= 1; dy = dy + 1) {
+          for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let xx = clamp(x + dx, 0, w - 1);
+            let yy = clamp(y + dy, 0, h - 1);
+            let s = textureLoad(srcTex, vec2<i32>(xx, yy), 0).xy;
+            let wgt = KW[(dy + 1) * 3 + (dx + 1)];
+            lapU = lapU + s.x * wgt;
+            lapV = lapV + s.y * wgt;
+          }
+        }
+
+        let center = textureLoad(srcTex, vec2<i32>(x, y), 0).xy;
+        let u = center.x;
+        let v = center.y;
+
+        let fk = textureLoad(paramsTex, vec2<i32>(x, y), 0).xy;
+        let uvp = (vec2f(f32(x), f32(y)) + 0.5) / vec2f(f32(w), f32(h));
+
+        let driftF = 0.003 * sin(params.time * 0.055 + uvp.x * 5.0 + uvp.y * 2.3);
+        let driftK = 0.0015 * cos(params.time * 0.04 + uvp.y * 4.1 - uvp.x * 1.7);
+        let f = clamp(fk.x + driftF, 0.012, 0.065);
+        let k = clamp(fk.y + driftK, 0.046, 0.067);
+
+        let Du = 1.0;
+        let Dv = 0.5;
+        let uvv = u * v * v;
+        let du = Du * lapU - uvv + f * (1.0 - u);
+        let dv = Dv * lapV + uvv - (f + k) * v;
+
+        var newU = clamp(u + du * params.dt, 0.0, 1.0);
+        var newV = clamp(v + dv * params.dt, 0.0, 1.0);
+
+        // mouse injection (drag to paint chemical B)
+        if (params.mouseDown > 0.5) {
+          let mouseUV = vec2f(params.mouseX, params.mouseY);
+          let distPix = length(uvp - mouseUV) * f32(w);
+          let influence = smoothstep(params.mouseRadius, 0.0, distPix);
+          newV = clamp(newV + influence * 0.9, 0.0, 1.0);
+          newU = clamp(newU - influence * 0.5, 0.0, 1.0);
+        }
+
+        // Occasional reseed blobs so fully-settled patches can reignite and the
+        // pattern never fully stabilizes. A single stray pixel bump dies instantly
+        // under diffusion, so every ~7s each grid cell has a small chance to spawn
+        // a real seed blob (all pixels within its radius agree, since the random
+        // draw depends only on the shared cell id + time slot, not per-pixel noise).
+        let reseedCell = 24.0;
+        let reseedRadius = 3.0;
+        let reseedPeriod = 7.0;
+        let cellId = floor(vec2f(f32(x), f32(y)) / reseedCell);
+        let timeSlot = floor(params.time / reseedPeriod);
+        let fires = hash(cellId + vec2f(timeSlot * 17.13, timeSlot * 7.77));
+        if (fires > 0.986) {
+          let jx = hash(cellId + vec2f(timeSlot * 3.1 + 1.0, timeSlot * 2.3));
+          let jy = hash(cellId + vec2f(timeSlot * 1.7, timeSlot * 4.4 + 2.0));
+          let blobCenter = cellId * reseedCell + vec2f(jx, jy) * (reseedCell - 2.0 * reseedRadius) + reseedRadius;
+          if (distance(vec2f(f32(x), f32(y)), blobCenter) < reseedRadius) {
+            newV = max(newV, 0.5);
+            newU = min(newU, 0.3);
+          }
+        }
+
+        textureStore(dstTex, vec2<i32>(x, y), vec4f(newU, newV, 0.0, 1.0));
+      }
+    `,
+  });
+
+  const renderModule = device.createShaderModule({
+    label: "render",
+    code: `
+      struct VSOut {
+        @builtin(position) pos: vec4f,
+        @location(0) uv: vec2f,
+      };
+
+      @vertex
+      fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+        var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+        var out: VSOut;
+        let xy = p[vi];
+        out.pos = vec4f(xy, 0.0, 1.0);
+        out.uv = vec2f((xy.x + 1.0) * 0.5, 1.0 - (xy.y + 1.0) * 0.5);
+        return out;
+      }
+
+      @group(0) @binding(0) var stateTex: texture_2d<f32>;
+      @group(0) @binding(1) var photoTex: texture_2d<f32>;
+      @group(0) @binding(2) var paramsTex: texture_2d<f32>;
+      @group(0) @binding(3) var smp: sampler;
+
+      @fragment
+      fn fs(in: VSOut) -> @location(0) vec4f {
+        let uv = in.uv;
+        let st = textureSample(stateTex, smp, uv);
+        let photo = textureSample(photoTex, smp, uv);
+        let pp = textureSample(paramsTex, smp, uv);
+        let v = st.y;
+
+        let texel = 1.0 / vec2f(textureDimensions(stateTex));
+        let vR = textureSample(stateTex, smp, uv + vec2f(texel.x, 0.0)).y;
+        let vL = textureSample(stateTex, smp, uv - vec2f(texel.x, 0.0)).y;
+        let vU = textureSample(stateTex, smp, uv + vec2f(0.0, texel.y)).y;
+        let vD = textureSample(stateTex, smp, uv - vec2f(0.0, texel.y)).y;
+        let gx = vR - vL;
+        let gy = vU - vD;
+
+        let normal = normalize(vec3f(-gx * 10.0, -gy * 10.0, 1.0));
+        let lightDir = normalize(vec3f(0.45, 0.6, 0.66));
+        let diff = clamp(dot(normal, lightDir), 0.0, 1.0);
+        let spec = pow(diff, 20.0);
+
+        let mask = smoothstep(0.05, 0.3, v);
+
+        let coolC = vec3f(0.04, 0.10, 0.20);
+        let warmC = vec3f(0.98, 0.56, 0.28);
+        let patternBase = mix(coolC, warmC, diff);
+        let tinted = mix(patternBase, photo.rgb * 1.25, 0.32);
+        let patternColor = tinted * (0.55 + 0.65 * diff) + vec3f(spec * 0.55);
+
+        let darkPhoto = photo.rgb * 0.5;
+        var color = mix(darkPhoto, patternColor, mask);
+        // faint warm glow tracing the portrait's edges (brows, jaw, curtain folds)
+        color = color + vec3f(0.9, 0.5, 0.2) * pp.b * 0.1;
+        color = color + vec3f(0.015 + pp.a * 0.01);
+
+        return vec4f(clamp(color, vec3f(0.0), vec3f(1.0)), 1.0);
+      }
+    `,
+  });
+
+  // ---- pipelines --------------------------------------------------------
+  const initParamsPipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: initParamsModule, entryPoint: "main" },
+  });
+  const initStatePipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: initStateModule, entryPoint: "main" },
+  });
+  const updatePipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: updateModule, entryPoint: "main" },
+  });
+  const renderPipeline = device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: renderModule, entryPoint: "vs" },
+    fragment: {
+      module: renderModule,
+      entryPoint: "fs",
+      targets: [{ format: presentationFormat }],
+    },
+    primitive: { topology: "triangle-list" },
+  });
+
+  // ---- bind groups --------------------------------------------------------
+  const initParamsBG = device.createBindGroup({
+    layout: initParamsPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: photoTex.createView() },
+      { binding: 1, resource: linearSampler },
+      { binding: 2, resource: paramsTex.createView() },
+    ],
+  });
+
+  function makeInitStateBG(tex) {
+    return device.createBindGroup({
+      layout: initStatePipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: tex.createView() }],
+    });
+  }
+  const initStateBG_A = makeInitStateBG(stateTexA);
+  const initStateBG_B = makeInitStateBG(stateTexB);
+
+  function makeUpdateBG(srcTex, dstTex) {
+    return device.createBindGroup({
+      layout: updatePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: srcTex.createView() },
+        { binding: 1, resource: dstTex.createView() },
+        { binding: 2, resource: paramsTex.createView() },
+        { binding: 3, resource: { buffer: uniformBuffer } },
+      ],
+    });
+  }
+  const updateBG_AtoB = makeUpdateBG(stateTexA, stateTexB);
+  const updateBG_BtoA = makeUpdateBG(stateTexB, stateTexA);
+
+  function makeRenderBG(stateTex) {
+    return device.createBindGroup({
+      layout: renderPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: stateTex.createView() },
+        { binding: 1, resource: photoTex.createView() },
+        { binding: 2, resource: paramsTex.createView() },
+        { binding: 3, resource: linearSampler },
+      ],
+    });
+  }
+  const renderBG_A = makeRenderBG(stateTexA);
+  const renderBG_B = makeRenderBG(stateTexB);
+
+  // ---- init runs -----------------------------------------------------
+  function dispatchOnce(pipeline, bindGroup) {
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    const groups = Math.ceil(SIM_SIZE / 8);
+    pass.dispatchWorkgroups(groups, groups);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+  }
+
+  dispatchOnce(initParamsPipeline, initParamsBG);
+  let current = "A";
+  dispatchOnce(initStatePipeline, initStateBG_A);
+
+  function resetSim() {
+    dispatchOnce(initStatePipeline, initStateBG_A);
+    current = "A";
+  }
+
+  // ---- pointer input ----------------------------------------------------
+  let mouseX = 0.5, mouseY = 0.5, mouseDown = 0;
+  function updatePointer(e) {
+    const rect = canvasEl.getBoundingClientRect();
+    mouseX = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    mouseY = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+  }
+  canvasEl.addEventListener("pointerdown", (e) => {
+    mouseDown = 1;
+    updatePointer(e);
+    canvasEl.setPointerCapture(e.pointerId);
+  });
+  canvasEl.addEventListener("pointermove", (e) => {
+    updatePointer(e);
+  });
+  window.addEventListener("pointerup", () => { mouseDown = 0; });
+  canvasEl.addEventListener("pointercancel", () => { mouseDown = 0; });
+  canvasEl.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    resetSim();
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "r" || e.key === "R") resetSim();
+  });
+
+  // ---- canvas sizing ------------------------------------------------------
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = canvasEl.getBoundingClientRect();
+    const w = Math.max(1, Math.round(rect.width * dpr));
+    const h = Math.max(1, Math.round(rect.height * dpr));
+    if (canvasEl.width !== w || canvasEl.height !== h) {
+      canvasEl.width = w;
+      canvasEl.height = h;
+    }
+  }
+  const ro = new ResizeObserver(resize);
+  ro.observe(canvasEl);
+  resize();
+
+  // ---- main loop ------------------------------------------------------
+  const uniformData = new Float32Array(8);
+  const startTime = performance.now();
+
+  function frame() {
+    const t = (performance.now() - startTime) / 1000;
+
+    uniformData[0] = t;
+    uniformData[1] = 1.0;
+    uniformData[2] = mouseX;
+    uniformData[3] = mouseY;
+    uniformData[4] = mouseDown;
+    uniformData[5] = 14.0;
+    uniformData[6] = SIM_SIZE;
+    uniformData[7] = SIM_SIZE;
+    device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+    const encoder = device.createCommandEncoder();
+    const computePass = encoder.beginComputePass();
+    computePass.setPipeline(updatePipeline);
+    const groups = Math.ceil(SIM_SIZE / 8);
+    for (let i = 0; i < ITERATIONS_PER_FRAME; i++) {
+      const bg = current === "A" ? updateBG_AtoB : updateBG_BtoA;
+      computePass.setBindGroup(0, bg);
+      computePass.dispatchWorkgroups(groups, groups);
+      current = current === "A" ? "B" : "A";
+    }
+    computePass.end();
+
+    const renderBG = current === "A" ? renderBG_A : renderBG_B;
+    const renderPass = encoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: context.getCurrentTexture().createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          loadOp: "clear",
+          storeOp: "store",
+        },
+      ],
+    });
+    renderPass.setPipeline(renderPipeline);
+    renderPass.setBindGroup(0, renderBG);
+    renderPass.draw(3);
+    renderPass.end();
+
+    device.queue.submit([encoder.finish()]);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+main().catch((err) => {
+  console.error(err);
+  showMessage("Something went wrong starting this experiment: " + (err && err.message ? err.message : err));
+});
+</script>
+</body>
+</html>

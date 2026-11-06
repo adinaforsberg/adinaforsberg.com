@@ -1,0 +1,843 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Liquid Portrait — Adina Manghi Forsberg</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #07080b;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+  }
+  .stage {
+    position: relative;
+    width: min(90vw, 90vh);
+    height: min(90vw, 90vh);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    border-radius: 2px;
+    touch-action: none;
+    cursor: crosshair;
+    background: #0a0c10;
+    box-shadow: 0 40px 120px -40px rgba(0, 0, 0, 0.8);
+  }
+  .caption {
+    position: fixed;
+    left: 50%;
+    bottom: 28px;
+    transform: translateX(-50%);
+    color: rgba(235, 238, 245, 0.55);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-align: center;
+    pointer-events: none;
+    user-select: none;
+  }
+  .caption strong {
+    color: rgba(235, 238, 245, 0.85);
+    font-weight: 500;
+  }
+  .back {
+    position: fixed;
+    top: 22px;
+    left: 24px;
+    color: rgba(235, 238, 245, 0.45);
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-decoration: none;
+    text-transform: uppercase;
+    padding: 6px 10px;
+    border: 1px solid rgba(235, 238, 245, 0.15);
+    border-radius: 3px;
+    transition: color 0.2s ease, border-color 0.2s ease;
+  }
+  .back:hover {
+    color: rgba(235, 238, 245, 0.9);
+    border-color: rgba(235, 238, 245, 0.4);
+  }
+  .fallback-note {
+    position: fixed;
+    top: 22px;
+    right: 24px;
+    max-width: 260px;
+    color: rgba(255, 170, 120, 0.85);
+    font-size: 11px;
+    line-height: 1.4;
+    letter-spacing: 0.02em;
+    text-align: right;
+    display: none;
+  }
+</style>
+</head>
+<body>
+  <a class="back" href="/experiments/">&larr; experiments</a>
+  <div class="stage">
+    <canvas id="glcanvas"></canvas>
+  </div>
+  <div class="caption"><strong>Liquid Portrait</strong> &mdash; drag to stir, let it settle</div>
+  <div class="fallback-note" id="fallbackNote"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("glcanvas");
+  var fallbackNote = document.getElementById("fallbackNote");
+
+  function showFallback(message) {
+    fallbackNote.textContent = message;
+    fallbackNote.style.display = "block";
+  }
+
+  // ---------------------------------------------------------------------
+  // WebGL2 context + capability checks
+  // ---------------------------------------------------------------------
+  var gl = canvas.getContext("webgl2", {
+    alpha: false,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    preserveDrawingBuffer: false
+  });
+
+  if (!gl) {
+    runStaticFallback("WebGL2 is not available in this browser — showing the portrait without the fluid effect.");
+    return;
+  }
+
+  gl.getExtension("EXT_color_buffer_float");
+  gl.getExtension("OES_texture_float_linear");
+  gl.getExtension("EXT_color_buffer_half_float");
+  gl.getExtension("OES_texture_half_float_linear");
+
+  function supportRenderTextureFormat(internalFormat, format, type) {
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, 4, 4, 0, format, type, null);
+    var fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    var status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fbo);
+    gl.deleteTexture(tex);
+    return status === gl.FRAMEBUFFER_COMPLETE;
+  }
+
+  var simFormat = null;
+  var filterable = true;
+  if (supportRenderTextureFormat(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT)) {
+    simFormat = { internalFormat: gl.RGBA16F, format: gl.RGBA, type: gl.HALF_FLOAT };
+  } else if (supportRenderTextureFormat(gl.RGBA32F, gl.RGBA, gl.FLOAT)) {
+    simFormat = { internalFormat: gl.RGBA32F, format: gl.RGBA, type: gl.FLOAT };
+    filterable = false; // many devices can't linear-filter 32F without an extra extension
+  } else {
+    runStaticFallback("This GPU/browser doesn't expose floating point render targets — showing the portrait without the fluid effect.");
+    return;
+  }
+
+  var linearFilter = filterable ? gl.LINEAR : gl.NEAREST;
+
+  // ---------------------------------------------------------------------
+  // Shader sources
+  // ---------------------------------------------------------------------
+  var VERTEX_SHADER =
+    "#version 300 es\n" +
+    "precision highp float;\n" +
+    "layout(location = 0) in vec2 aPosition;\n" +
+    "out vec2 vUv;\n" +
+    "out vec2 vL;\n" +
+    "out vec2 vR;\n" +
+    "out vec2 vT;\n" +
+    "out vec2 vB;\n" +
+    "uniform vec2 texelSize;\n" +
+    "void main () {\n" +
+    "  vUv = aPosition * 0.5 + 0.5;\n" +
+    "  vL = vUv - vec2(texelSize.x, 0.0);\n" +
+    "  vR = vUv + vec2(texelSize.x, 0.0);\n" +
+    "  vT = vUv + vec2(0.0, texelSize.y);\n" +
+    "  vB = vUv - vec2(0.0, texelSize.y);\n" +
+    "  gl_Position = vec4(aPosition, 0.0, 1.0);\n" +
+    "}\n";
+
+  var FRAG_HEADER = "#version 300 es\nprecision highp float;\nprecision highp sampler2D;\n";
+
+  var COPY_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uTexture;\n" +
+    "void main () { fragColor = texture(uTexture, vUv); }\n";
+
+  var CLEAR_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uTexture;\n" +
+    "uniform float value;\n" +
+    "void main () { fragColor = value * texture(uTexture, vUv); }\n";
+
+  var SPLAT_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uTarget;\n" +
+    "uniform float aspectRatio;\n" +
+    "uniform vec2 point;\n" +
+    "uniform vec3 splatColor;\n" +
+    "uniform float radius;\n" +
+    "void main () {\n" +
+    "  vec2 p = vUv - point;\n" +
+    "  p.x *= aspectRatio;\n" +
+    "  float d = exp(-dot(p, p) / radius);\n" +
+    "  vec3 base = texture(uTarget, vUv).xyz;\n" +
+    "  fragColor = vec4(base + splatColor * d, 1.0);\n" +
+    "}\n";
+
+  var ADVECTION_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uVelocity;\n" +
+    "uniform sampler2D uSource;\n" +
+    "uniform vec2 velTexelSize;\n" +
+    "uniform float dt;\n" +
+    "uniform float dissipation;\n" +
+    "void main () {\n" +
+    "  vec2 vel = texture(uVelocity, vUv).xy;\n" +
+    "  vec2 coord = vUv - dt * vel * velTexelSize;\n" +
+    "  vec4 result = texture(uSource, coord);\n" +
+    "  float decay = 1.0 + dissipation * dt;\n" +
+    "  fragColor = result / decay;\n" +
+    "}\n";
+
+  var DIVERGENCE_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "in vec2 vL;\n" +
+    "in vec2 vR;\n" +
+    "in vec2 vT;\n" +
+    "in vec2 vB;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uVelocity;\n" +
+    "void main () {\n" +
+    "  float L = texture(uVelocity, vL).x;\n" +
+    "  float R = texture(uVelocity, vR).x;\n" +
+    "  float T = texture(uVelocity, vT).y;\n" +
+    "  float B = texture(uVelocity, vB).y;\n" +
+    "  float div = 0.5 * ((R - L) + (T - B));\n" +
+    "  fragColor = vec4(div, 0.0, 0.0, 1.0);\n" +
+    "}\n";
+
+  var CURL_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "in vec2 vL;\n" +
+    "in vec2 vR;\n" +
+    "in vec2 vT;\n" +
+    "in vec2 vB;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uVelocity;\n" +
+    "void main () {\n" +
+    "  float L = texture(uVelocity, vL).y;\n" +
+    "  float R = texture(uVelocity, vR).y;\n" +
+    "  float T = texture(uVelocity, vT).x;\n" +
+    "  float B = texture(uVelocity, vB).x;\n" +
+    "  float curl = 0.5 * ((R - L) - (T - B));\n" +
+    "  fragColor = vec4(curl, 0.0, 0.0, 1.0);\n" +
+    "}\n";
+
+  var VORTICITY_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "in vec2 vL;\n" +
+    "in vec2 vR;\n" +
+    "in vec2 vT;\n" +
+    "in vec2 vB;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uVelocity;\n" +
+    "uniform sampler2D uCurl;\n" +
+    "uniform float curlStrength;\n" +
+    "uniform float dt;\n" +
+    "uniform float maxVel;\n" +
+    "void main () {\n" +
+    "  float L = texture(uCurl, vL).x;\n" +
+    "  float R = texture(uCurl, vR).x;\n" +
+    "  float T = texture(uCurl, vT).x;\n" +
+    "  float B = texture(uCurl, vB).x;\n" +
+    "  float C = texture(uCurl, vUv).x;\n" +
+    "  vec2 force = 0.5 * vec2(abs(T) - abs(B), abs(R) - abs(L));\n" +
+    "  force /= length(force) + 0.0001;\n" +
+    "  force *= curlStrength * C;\n" +
+    "  force.y *= -1.0;\n" +
+    "  vec2 vel = texture(uVelocity, vUv).xy;\n" +
+    "  vel += force * dt;\n" +
+    "  vel = clamp(vel, -maxVel, maxVel);\n" +
+    "  fragColor = vec4(vel, 0.0, 1.0);\n" +
+    "}\n";
+
+  var PRESSURE_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "in vec2 vL;\n" +
+    "in vec2 vR;\n" +
+    "in vec2 vT;\n" +
+    "in vec2 vB;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uPressure;\n" +
+    "uniform sampler2D uDivergence;\n" +
+    "void main () {\n" +
+    "  float L = texture(uPressure, vL).x;\n" +
+    "  float R = texture(uPressure, vR).x;\n" +
+    "  float T = texture(uPressure, vT).x;\n" +
+    "  float B = texture(uPressure, vB).x;\n" +
+    "  float C = texture(uDivergence, vUv).x;\n" +
+    "  float pressure = (L + R + B + T - C) * 0.25;\n" +
+    "  fragColor = vec4(pressure, 0.0, 0.0, 1.0);\n" +
+    "}\n";
+
+  var GRADIENT_SUBTRACT_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "in vec2 vL;\n" +
+    "in vec2 vR;\n" +
+    "in vec2 vT;\n" +
+    "in vec2 vB;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uPressure;\n" +
+    "uniform sampler2D uVelocity;\n" +
+    "void main () {\n" +
+    "  float L = texture(uPressure, vL).x;\n" +
+    "  float R = texture(uPressure, vR).x;\n" +
+    "  float T = texture(uPressure, vT).x;\n" +
+    "  float B = texture(uPressure, vB).x;\n" +
+    "  vec2 vel = texture(uVelocity, vUv).xy;\n" +
+    "  vel -= vec2(R - L, T - B) * 0.5;\n" +
+    "  fragColor = vec4(vel, 0.0, 1.0);\n" +
+    "}\n";
+
+  var AMBIENT_FORCE_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uVelocity;\n" +
+    "uniform float time;\n" +
+    "uniform float amplitude;\n" +
+    "uniform float dt;\n" +
+    "vec2 curlish(vec2 p, float t) {\n" +
+    "  float n1 = sin(p.x * 2.6 + t * 0.32) + sin(p.y * 3.7 - t * 0.21) + sin((p.x + p.y) * 1.8 + t * 0.14);\n" +
+    "  float n2 = cos(p.y * 3.1 - t * 0.27) + cos(p.x * 2.3 + t * 0.19) + cos((p.x - p.y) * 2.9 - t * 0.16);\n" +
+    "  return vec2(n1, n2);\n" +
+    "}\n" +
+    "void main () {\n" +
+    "  vec2 vel = texture(uVelocity, vUv).xy;\n" +
+    "  vec2 n = curlish(vUv * 3.1 + 7.0, time);\n" +
+    "  vel += n * amplitude * dt;\n" +
+    "  fragColor = vec4(vel, 0.0, 1.0);\n" +
+    "}\n";
+
+  // The warp field stores a UV *displacement* (not colour). Undisturbed areas
+  // hold ~(0,0) and the display pass samples the pristine source photo
+  // directly, so rest/recovered regions stay exactly as sharp as the
+  // original image — only the smooth displacement field gets blurred by
+  // repeated advection, never the picture itself.
+  var DISPLACEMENT_ADVECT_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uVelocity;\n" +
+    "uniform sampler2D uSource;\n" +
+    "uniform vec2 velTexelSize;\n" +
+    "uniform float dt;\n" +
+    "uniform float gain;\n" +
+    "void main () {\n" +
+    "  vec2 vel = texture(uVelocity, vUv).xy;\n" +
+    "  vec2 coord = vUv - dt * vel * velTexelSize;\n" +
+    "  vec2 d = texture(uSource, coord).xy;\n" +
+    "  d += vel * dt * velTexelSize * gain;\n" +
+    "  fragColor = vec4(d, 0.0, 1.0);\n" +
+    "}\n";
+
+  var RESTORE_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uDisplacement;\n" +
+    "uniform float rate;\n" +
+    "void main () {\n" +
+    "  vec2 d = texture(uDisplacement, vUv).xy;\n" +
+    "  fragColor = vec4(mix(d, vec2(0.0), clamp(rate, 0.0, 1.0)), 0.0, 1.0);\n" +
+    "}\n";
+
+  var DISPLAY_FRAG = FRAG_HEADER +
+    "in vec2 vUv;\n" +
+    "out vec4 fragColor;\n" +
+    "uniform sampler2D uDisplacement;\n" +
+    "uniform sampler2D uOriginal;\n" +
+    "uniform float maxDisplacement;\n" +
+    "void main () {\n" +
+    "  vec2 d = texture(uDisplacement, vUv).xy;\n" +
+    "  float len = length(d);\n" +
+    "  vec2 dClamped = len > 0.0001 ? d * (min(len, maxDisplacement) / len) : d;\n" +
+    "  vec3 color = texture(uOriginal, vUv - dClamped).rgb;\n" +
+    "  vec2 centered = vUv - 0.5;\n" +
+    "  float vign = smoothstep(0.85, 0.35, length(centered));\n" +
+    "  color *= mix(0.78, 1.0, vign);\n" +
+    "  fragColor = vec4(color, 1.0);\n" +
+    "}\n";
+
+  // ---------------------------------------------------------------------
+  // GL program helpers
+  // ---------------------------------------------------------------------
+  function compileShader(type, source) {
+    var shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      console.error("Shader compile error:", gl.getShaderInfoLog(shader));
+    }
+    return shader;
+  }
+
+  var sharedVertexShader = compileShader(gl.VERTEX_SHADER, VERTEX_SHADER);
+
+  function createProgram(fragSource) {
+    var fs = compileShader(gl.FRAGMENT_SHADER, fragSource);
+    var program = gl.createProgram();
+    gl.attachShader(program, sharedVertexShader);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error("Program link error:", gl.getProgramInfoLog(program));
+    }
+    var uniforms = {};
+    var count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
+    for (var i = 0; i < count; i++) {
+      var info = gl.getActiveUniform(program, i);
+      uniforms[info.name] = gl.getUniformLocation(program, info.name);
+    }
+    return { program: program, uniforms: uniforms };
+  }
+
+  var copyProgram = createProgram(COPY_FRAG);
+  var clearProgram = createProgram(CLEAR_FRAG);
+  var splatProgram = createProgram(SPLAT_FRAG);
+  var advectionProgram = createProgram(ADVECTION_FRAG);
+  var displacementProgram = createProgram(DISPLACEMENT_ADVECT_FRAG);
+  var divergenceProgram = createProgram(DIVERGENCE_FRAG);
+  var curlProgram = createProgram(CURL_FRAG);
+  var vorticityProgram = createProgram(VORTICITY_FRAG);
+  var pressureProgram = createProgram(PRESSURE_FRAG);
+  var gradientSubtractProgram = createProgram(GRADIENT_SUBTRACT_FRAG);
+  var ambientForceProgram = createProgram(AMBIENT_FORCE_FRAG);
+  var restoreProgram = createProgram(RESTORE_FRAG);
+  var displayProgram = createProgram(DISPLAY_FRAG);
+
+  function useProgram(p) {
+    gl.useProgram(p.program);
+    return p.uniforms;
+  }
+
+  // Fullscreen quad
+  var quadBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  var quadVao = gl.createVertexArray();
+  gl.bindVertexArray(quadVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  gl.disable(gl.BLEND);
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.STENCIL_TEST);
+
+  function blit(target) {
+    if (target == null) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    } else {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+      gl.viewport(0, 0, target.width, target.height);
+    }
+    gl.bindVertexArray(quadVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  // ---------------------------------------------------------------------
+  // Framebuffer helpers
+  // ---------------------------------------------------------------------
+  function createFBO(w, h, filter) {
+    gl.activeTexture(gl.TEXTURE0);
+    var texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, simFormat.internalFormat, w, h, 0, simFormat.format, simFormat.type, null);
+    var fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    return {
+      texture: texture,
+      fbo: fbo,
+      width: w,
+      height: h,
+      texelSizeX: 1 / w,
+      texelSizeY: 1 / h,
+      attach: function (id) {
+        gl.activeTexture(gl.TEXTURE0 + id);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        return id;
+      }
+    };
+  }
+
+  function createDoubleFBO(w, h, filter) {
+    var fbo1 = createFBO(w, h, filter);
+    var fbo2 = createFBO(w, h, filter);
+    return {
+      width: w,
+      height: h,
+      texelSizeX: 1 / w,
+      texelSizeY: 1 / h,
+      read: fbo1,
+      write: fbo2,
+      swap: function () {
+        var tmp = this.read;
+        this.read = this.write;
+        this.write = tmp;
+      }
+    };
+  }
+
+  // ---------------------------------------------------------------------
+  // Simulation constants
+  // ---------------------------------------------------------------------
+  var SIM_RES = 128;
+  var WARP_RES_CAP = 512; // displacement field is smooth/low-frequency, doesn't need dye-level resolution
+  var PRESSURE_ITERATIONS = 24;
+  var PRESSURE_DECAY = 0.78;
+  var CURL_STRENGTH = 1.6; // vorticity confinement resists dissipation by design; our velocity units run large, so keep this low or any perturbation grows into a runaway vortex
+  var VELOCITY_DISSIPATION = 2.4; // strong damping so injected energy fades out instead of lingering
+  var VELOCITY_CLAMP = 380; // keeps a single frame's advection displacement from blowing past the image
+  var SPLAT_RADIUS = 0.0022;
+  var SPLAT_FORCE = 2600;
+  var AMBIENT_AMPLITUDE = 2.2; // gentle breathing motion; vorticity confinement reinforces any ambient curl, so keep this low
+  var RESTORE_RATE = 0.4; // per-second blend-back-to-original time constant
+  var DISPLACEMENT_GAIN = 0.85; // scales how much local flow accumulates into the warp field
+  var MAX_DISPLACEMENT = 0.26; // clamp, in uv units, so sampling never wanders far off the photo
+
+  var velocity = createDoubleFBO(SIM_RES, SIM_RES, linearFilter);
+  var pressure = createDoubleFBO(SIM_RES, SIM_RES, gl.NEAREST);
+  var divergenceFBO = createFBO(SIM_RES, SIM_RES, gl.NEAREST);
+  var curlFBO = createFBO(SIM_RES, SIM_RES, gl.NEAREST);
+
+  var warp = null; // double FBO holding a UV displacement field; (0,0) = undisturbed
+  var imageTexture = null;
+  var imageAspect = 1;
+  var ready = false;
+
+  function initWarp(w, h) {
+    // createFBO already clears to (0,0,0,1), i.e. zero displacement — no need
+    // to seed it from the image since we no longer store colour here.
+    warp = createDoubleFBO(w, h, linearFilter);
+  }
+
+  // ---------------------------------------------------------------------
+  // Canvas sizing
+  // ---------------------------------------------------------------------
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  function resize() {
+    var cssSize = Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.9);
+    var pixelSize = Math.max(16, Math.round(cssSize * dpr));
+    if (canvas.width !== pixelSize || canvas.height !== pixelSize) {
+      canvas.width = pixelSize;
+      canvas.height = pixelSize;
+    }
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    if (ready) {
+      var warpSize = Math.min(pixelSize, WARP_RES_CAP);
+      if (!warp || warp.width !== warpSize) {
+        initWarp(warpSize, warpSize);
+      }
+    }
+  }
+
+  window.addEventListener("resize", resize);
+
+  // ---------------------------------------------------------------------
+  // Load the portrait
+  // ---------------------------------------------------------------------
+  var img = new Image();
+  img.onload = function () {
+    imageAspect = img.naturalWidth / img.naturalHeight;
+    imageTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, imageTexture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    ready = true;
+    resize();
+    lastTime = performance.now();
+    requestAnimationFrame(frame);
+  };
+  img.onerror = function () {
+    runStaticFallback("Couldn't load the portrait image — the fluid effect has nothing to distort.");
+  };
+  img.src = "/public/images/home-about.webp";
+
+  resize(); // establish canvas pixel size immediately so first frame isn't 0x0
+
+  // ---------------------------------------------------------------------
+  // Pointer input
+  // ---------------------------------------------------------------------
+  var pointers = {}; // id -> { x, y } in normalized [0,1] uv space (y up)
+
+  function normalizedFromEvent(e) {
+    var rect = canvas.getBoundingClientRect();
+    var x = (e.clientX - rect.left) / rect.width;
+    var y = 1.0 - (e.clientY - rect.top) / rect.height;
+    return { x: x, y: y };
+  }
+
+  var pendingSplats = [];
+
+  function queueSplat(x, y, dx, dy, forceScale) {
+    pendingSplats.push({ x: x, y: y, dx: dx, dy: dy, forceScale: forceScale });
+  }
+
+  canvas.addEventListener("pointerdown", function (e) {
+    canvas.setPointerCapture(e.pointerId);
+    var p = normalizedFromEvent(e);
+    pointers[e.pointerId] = p;
+  });
+
+  canvas.addEventListener("pointermove", function (e) {
+    var prev = pointers[e.pointerId];
+    var p = normalizedFromEvent(e);
+    if (prev) {
+      var dx = p.x - prev.x;
+      var dy = p.y - prev.y;
+      if (dx !== 0 || dy !== 0) {
+        queueSplat(p.x, p.y, dx, dy, 1.0);
+      }
+    }
+    pointers[e.pointerId] = p;
+  });
+
+  function releasePointer(e) {
+    delete pointers[e.pointerId];
+  }
+  canvas.addEventListener("pointerup", releasePointer);
+  canvas.addEventListener("pointercancel", releasePointer);
+  canvas.addEventListener("pointerleave", releasePointer);
+
+  // ---------------------------------------------------------------------
+  // Simulation steps
+  // ---------------------------------------------------------------------
+  function applySplat(x, y, dx, dy, forceScale) {
+    var uniforms = useProgram(splatProgram);
+    gl.uniform1i(uniforms.uTarget, velocity.read.attach(0));
+    gl.uniform1f(uniforms.aspectRatio, 1.0);
+    gl.uniform2f(uniforms.point, x, y);
+    gl.uniform3f(uniforms.splatColor, dx * SPLAT_FORCE * forceScale, dy * SPLAT_FORCE * forceScale, 0.0);
+    gl.uniform1f(uniforms.radius, SPLAT_RADIUS);
+    blit(velocity.write);
+    velocity.swap();
+  }
+
+  var nextAutoSplatAt = performance.now() + 1500;
+
+  function maybeAutoSplat(now) {
+    if (now < nextAutoSplatAt) return;
+    var angle = Math.random() * Math.PI * 2;
+    var mag = 0.004 + Math.random() * 0.004;
+    var x = 0.2 + Math.random() * 0.6;
+    var y = 0.2 + Math.random() * 0.6;
+    applySplat(x, y, Math.cos(angle) * mag, Math.sin(angle) * mag, 0.16);
+    nextAutoSplatAt = now + 3000 + Math.random() * 3500;
+  }
+
+  function step(dt, time) {
+    gl.disable(gl.BLEND);
+
+    // Ambient curl-ish forcing so the fluid is never fully still
+    var au = useProgram(ambientForceProgram);
+    gl.uniform1i(au.uVelocity, velocity.read.attach(0));
+    gl.uniform1f(au.time, time);
+    gl.uniform1f(au.amplitude, AMBIENT_AMPLITUDE);
+    gl.uniform1f(au.dt, dt);
+    blit(velocity.write);
+    velocity.swap();
+
+    // User + automatic splats
+    while (pendingSplats.length) {
+      var s = pendingSplats.shift();
+      applySplat(s.x, s.y, s.dx, s.dy, s.forceScale);
+    }
+
+    // Vorticity confinement
+    var cu = useProgram(curlProgram);
+    gl.uniform1i(cu.uVelocity, velocity.read.attach(0));
+    blit(curlFBO);
+
+    var vu = useProgram(vorticityProgram);
+    gl.uniform1i(vu.uVelocity, velocity.read.attach(0));
+    gl.uniform1i(vu.uCurl, curlFBO.attach(1));
+    gl.uniform1f(vu.curlStrength, CURL_STRENGTH);
+    gl.uniform1f(vu.dt, dt);
+    gl.uniform1f(vu.maxVel, VELOCITY_CLAMP);
+    blit(velocity.write);
+    velocity.swap();
+
+    // Projection: divergence -> pressure (jacobi) -> subtract gradient
+    var du = useProgram(divergenceProgram);
+    gl.uniform1i(du.uVelocity, velocity.read.attach(0));
+    blit(divergenceFBO);
+
+    var clu = useProgram(clearProgram);
+    gl.uniform1i(clu.uTexture, pressure.read.attach(0));
+    gl.uniform1f(clu.value, PRESSURE_DECAY);
+    blit(pressure.write);
+    pressure.swap();
+
+    var pu = useProgram(pressureProgram);
+    gl.uniform1i(pu.uDivergence, divergenceFBO.attach(1));
+    for (var i = 0; i < PRESSURE_ITERATIONS; i++) {
+      gl.uniform1i(pu.uPressure, pressure.read.attach(0));
+      blit(pressure.write);
+      pressure.swap();
+    }
+
+    var gu = useProgram(gradientSubtractProgram);
+    gl.uniform1i(gu.uPressure, pressure.read.attach(0));
+    gl.uniform1i(gu.uVelocity, velocity.read.attach(1));
+    blit(velocity.write);
+    velocity.swap();
+
+    // Advect velocity by itself
+    var velTexel = [velocity.texelSizeX, velocity.texelSizeY];
+    var adv = useProgram(advectionProgram);
+    gl.uniform1i(adv.uVelocity, velocity.read.attach(0));
+    gl.uniform1i(adv.uSource, velocity.read.attach(0));
+    gl.uniform2f(adv.velTexelSize, velTexel[0], velTexel[1]);
+    gl.uniform1f(adv.dt, dt);
+    gl.uniform1f(adv.dissipation, VELOCITY_DISSIPATION);
+    blit(velocity.write);
+    velocity.swap();
+
+    // Advect the warp (displacement) field through the now divergence-free
+    // field, and accumulate this frame's flow into it. This never touches
+    // image colour, so undisturbed/recovered pixels stay pixel-sharp.
+    if (warp) {
+      var wu = useProgram(displacementProgram);
+      gl.uniform1i(wu.uVelocity, velocity.read.attach(0));
+      gl.uniform1i(wu.uSource, warp.read.attach(1));
+      gl.uniform2f(wu.velTexelSize, velTexel[0], velTexel[1]);
+      gl.uniform1f(wu.dt, dt);
+      gl.uniform1f(wu.gain, DISPLACEMENT_GAIN);
+      blit(warp.write);
+      warp.swap();
+
+      // Slowly relax the displacement back toward zero (no warp)
+      var ru = useProgram(restoreProgram);
+      gl.uniform1i(ru.uDisplacement, warp.read.attach(0));
+      gl.uniform1f(ru.rate, 1.0 - Math.exp(-RESTORE_RATE * dt));
+      blit(warp.write);
+      warp.swap();
+    }
+  }
+
+  function render() {
+    if (!imageTexture) return;
+    var displayUniforms = useProgram(displayProgram);
+    gl.uniform1i(displayUniforms.uOriginal, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, imageTexture);
+    if (warp) {
+      gl.uniform1i(displayUniforms.uDisplacement, warp.read.attach(1));
+      gl.uniform1f(displayUniforms.maxDisplacement, MAX_DISPLACEMENT);
+    }
+    blit(null);
+  }
+
+  var lastTime = performance.now();
+  var startTime = lastTime;
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (document.hidden) {
+      lastTime = now;
+      return;
+    }
+    var dt = Math.min((now - lastTime) / 1000, 1 / 30);
+    lastTime = now;
+    var time = (now - startTime) / 1000;
+
+    maybeAutoSplat(now);
+    step(dt, time);
+    render();
+  }
+
+  // ---------------------------------------------------------------------
+  // Static fallback path (no WebGL2 / no float render targets)
+  // ---------------------------------------------------------------------
+  function runStaticFallback(message) {
+    showFallback(message);
+    var ctx = canvas.getContext("2d");
+    var fallbackImg = new Image();
+    fallbackImg.onload = function () {
+      function drawStatic() {
+        var size = Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.9);
+        canvas.width = size;
+        canvas.height = size;
+        var t = performance.now() / 1000;
+        var scale = 1.02 + Math.sin(t * 0.3) * 0.015;
+        ctx.save();
+        ctx.translate(size / 2, size / 2);
+        ctx.scale(scale, scale);
+        ctx.translate(-size / 2, -size / 2);
+        ctx.drawImage(fallbackImg, 0, 0, size, size);
+        ctx.restore();
+        requestAnimationFrame(drawStatic);
+      }
+      drawStatic();
+    };
+    fallbackImg.src = "/public/images/home-about.webp";
+  }
+})();
+</script>
+<script id="adina-context-guard">
+// Browsers cap the number of live WebGL contexts (~16) and drop the oldest when more tabs open one.
+// If that happens to this page, reload it the next time the tab is shown.
+(() => {
+  let lost = false;
+  document.addEventListener('webglcontextlost', (e) => { e.preventDefault(); lost = true; }, true);
+  const reloadIfLost = () => { if (lost && document.visibilityState === 'visible') location.reload(); };
+  document.addEventListener('visibilitychange', reloadIfLost);
+  window.addEventListener('focus', reloadIfLost);
+})();
+</script>
+</body>
+</html>

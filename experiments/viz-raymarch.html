@@ -1,0 +1,751 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Raymarch — pure audio visualizer</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    width: 100%;
+    background: #040406;
+    color: #e8e8ea;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+  }
+  canvas#gl {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    width: 100dvw;
+    height: 100dvh;
+    display: block;
+    cursor: pointer;
+  }
+
+  .back-link {
+    position: fixed;
+    top: 16px;
+    left: 18px;
+    font-size: 12.5px;
+    letter-spacing: .02em;
+    color: rgba(232,232,234,0.55);
+    text-decoration: none;
+    z-index: 30;
+    padding: 4px 2px;
+  }
+  .back-link:hover { color: #e8e8ea; }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: radial-gradient(ellipse at 50% 45%, rgba(20,16,30,0.55), rgba(2,2,4,0.82));
+    cursor: pointer;
+    transition: opacity .6s ease;
+    z-index: 20;
+    text-align: center;
+    padding: 20px;
+  }
+  .overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .play-ring {
+    width: 58px;
+    height: 58px;
+    border-radius: 50%;
+    border: 1px solid rgba(232,232,234,0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .play-ring svg { width: 18px; height: 18px; fill: #e8e8ea; margin-left: 3px; }
+  .overlay .label {
+    font-size: 13.5px;
+    letter-spacing: .03em;
+    color: #e8e8ea;
+  }
+  .overlay .sub {
+    font-size: 12px;
+    color: #9a9a9f;
+    max-width: 26em;
+    line-height: 1.5;
+  }
+
+  .hud {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px));
+    z-index: 25;
+    pointer-events: none;
+    flex-wrap: wrap;
+  }
+  .hud > * { pointer-events: auto; }
+  .hud-title {
+    font-size: 11.5px;
+    letter-spacing: .02em;
+    color: rgba(232,232,234,0.6);
+    white-space: nowrap;
+    max-width: 46vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hud-select {
+    appearance: none;
+    background: rgba(20,20,24,0.55);
+    border: 1px solid rgba(255,255,255,0.14);
+    color: #d8d8da;
+    font-size: 11.5px;
+    letter-spacing: .02em;
+    padding: 5px 10px;
+    border-radius: 100px;
+    cursor: pointer;
+    max-width: 44vw;
+  }
+  .hud-select:hover { border-color: rgba(255,255,255,0.3); }
+
+  .status {
+    position: fixed;
+    top: 16px;
+    right: 18px;
+    font-size: 10.5px;
+    color: rgba(255,255,255,0.28);
+    letter-spacing: .02em;
+    z-index: 25;
+    text-align: right;
+  }
+</style>
+</head>
+<body>
+
+  <a class="back-link" href="/experiments/">&larr; experiments</a>
+
+  <canvas id="gl"></canvas>
+
+  <div class="overlay" id="overlay">
+    <div class="play-ring"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
+    <div class="label">click to play</div>
+    <div class="sub">a raymarched sculpture of light, shaped only by the sound. no picture, no pointer &mdash;
+       just her music and a slow camera.</div>
+  </div>
+
+  <div class="hud" id="hud">
+    <span class="hud-title" id="hudTitle">&mdash;</span>
+    <select class="hud-select" id="trackSelect" aria-label="choose a track"></select>
+  </div>
+  <div class="status" id="status">idle</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- tracks ----------
+  var TRACKS = [
+    { file: "droplet",              label: "Droplet" },
+    { file: "arvegods",             label: "Arvegods" },
+    { file: "tystnadens-ro",        label: "Tystnadens ro" },
+    { file: "canis-major",          label: "Canis Major" },
+    { file: "scyphozoa",            label: "Scyphozoa" },
+    { file: "maxima-minima",        label: "Maxima Minima" },
+    { file: "kalis-daughters",      label: "Kali’s Daughters" },
+    { file: "scen-v-1",             label: "Scen V (I)" },
+    { file: "scen-v-2",             label: "Scen V (II)" },
+    { file: "scen-v-3",             label: "Scen V (III)" },
+    { file: "emigrantvisa",         label: "Emigrantvisa" },
+    { file: "you-are-my-sunshine",  label: "You’re My Sunshine" },
+    { file: "zwampen",              label: "Zwampen" },
+    { file: "love-me-tender",       label: "Love Me Tender" }
+  ];
+  var AUDIO_BASES = ["/audio/", "/public/audio/"];
+
+  var statusEl = document.getElementById("status");
+  var hudTitle = document.getElementById("hudTitle");
+  function setStatus(s) { statusEl.textContent = s; }
+
+  // ---------- canvas / gl ----------
+  var canvas = document.getElementById("gl");
+  var gl = canvas.getContext("webgl2", { antialias: false, alpha: false, premultipliedAlpha: false, powerPreference: "high-performance" });
+  if (!gl) {
+    setStatus("WebGL2 unavailable");
+    throw new Error("WebGL2 not supported");
+  }
+
+  function compileShader(src, type) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      var log = gl.getShaderInfoLog(sh);
+      gl.deleteShader(sh);
+      throw new Error("Shader compile error: " + log);
+    }
+    return sh;
+  }
+
+  var VERT_SRC = "#version 300 es\n" +
+    "void main() {\n" +
+    "  vec2 pos = vec2(\n" +
+    "    (gl_VertexID == 2) ? 3.0 : -1.0,\n" +
+    "    (gl_VertexID == 1) ? 3.0 : -1.0\n" +
+    "  );\n" +
+    "  gl_Position = vec4(pos, 0.0, 1.0);\n" +
+    "}\n";
+
+  var FRAG_SRC = "#version 300 es\n" +
+  "precision highp float;\n" +
+  "\n" +
+  "uniform vec2  uResolution;\n" +
+  "uniform float uTime;\n" +
+  "uniform float uBass;\n" +
+  "uniform float uMids;\n" +
+  "uniform float uHighs;\n" +
+  "uniform float uOnset;\n" +
+  "uniform float uBassSwell;\n" +
+  "uniform float uCamSpin;\n" +
+  "uniform float uPlaying;\n" +
+  "\n" +
+  "out vec4 fragColor;\n" +
+  "\n" +
+  "mat2 rot2(float a) { float s = sin(a), c = cos(a); return mat2(c, s, -s, c); }\n" +
+  "\n" +
+  "float hash13(vec3 p3) {\n" +
+  "  p3 = fract(p3 * 0.1031);\n" +
+  "  p3 += dot(p3, p3.yzx + 33.33);\n" +
+  "  return fract((p3.x + p3.y) * p3.z);\n" +
+  "}\n" +
+  "\n" +
+  "float vnoise(vec3 x) {\n" +
+  "  vec3 i = floor(x);\n" +
+  "  vec3 f = fract(x);\n" +
+  "  f = f * f * (3.0 - 2.0 * f);\n" +
+  "  return mix(\n" +
+  "    mix(mix(hash13(i + vec3(0.0,0.0,0.0)), hash13(i + vec3(1.0,0.0,0.0)), f.x),\n" +
+  "        mix(hash13(i + vec3(0.0,1.0,0.0)), hash13(i + vec3(1.0,1.0,0.0)), f.x), f.y),\n" +
+  "    mix(mix(hash13(i + vec3(0.0,0.0,1.0)), hash13(i + vec3(1.0,0.0,1.0)), f.x),\n" +
+  "        mix(hash13(i + vec3(0.0,1.0,1.0)), hash13(i + vec3(1.0,1.0,1.0)), f.x), f.y),\n" +
+  "    f.z);\n" +
+  "}\n" +
+  "\n" +
+  "float fbm(vec3 p) {\n" +
+  "  float v = 0.0, a = 0.5;\n" +
+  "  for (int i = 0; i < 3; i++) { v += a * vnoise(p); p *= 2.08; a *= 0.5; }\n" +
+  "  return v;\n" +
+  "}\n" +
+  "\n" +
+  "float smin(float a, float b, float k) {\n" +
+  "  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);\n" +
+  "  return mix(b, a, h) - k * h * (1.0 - h);\n" +
+  "}\n" +
+  "\n" +
+  "float sdSphere(vec3 p, float r) { return length(p) - r; }\n" +
+  "\n" +
+  "vec3 blobPos(int i, float t) {\n" +
+  "  float fi = float(i);\n" +
+  "  float speed = 0.15 + fi * 0.027;\n" +
+  "  float phase = fi * 2.399;\n" +
+  "  float r = 0.78 + 0.22 * sin(fi * 1.7 + 0.6);\n" +
+  "  vec3 p;\n" +
+  "  p.x = r * cos(t * speed + phase);\n" +
+  "  p.z = r * sin(t * speed * 0.86 + phase);\n" +
+  "  p.y = 0.46 * sin(t * speed * 0.63 + phase * 1.3);\n" +
+  "  return p;\n" +
+  "}\n" +
+  "\n" +
+  "float blobRadius(int i, float swell) {\n" +
+  "  float fi = float(i);\n" +
+  "  float r = 0.1 + 0.15 * (0.5 + 0.5 * sin(fi * 2.1 + 1.0));\n" +
+  "  return r * swell;\n" +
+  "}\n" +
+  "\n" +
+  "float map(vec3 p) {\n" +
+  "  vec3 q = p;\n" +
+  "  float twist = 0.55 + uMids * 1.7;\n" +
+  "  float ang = q.y * twist + uTime * 0.11;\n" +
+  "  q.xz = rot2(ang) * q.xz;\n" +
+  "\n" +
+  "  // low k at rest keeps the bodies separate; bass swells pull them into\n" +
+  "  // one another; an onset makes a brief, elegant split before they re-settle.\n" +
+  "  float bassC = clamp(uBass, 0.0, 1.0);\n" +
+  "  float swellC = clamp(uBassSwell, 0.0, 1.0);\n" +
+  "  float k = mix(0.085, 0.52, swellC) - uOnset * 0.09;\n" +
+  "  k = clamp(k, 0.03, 0.58);\n" +
+  "  float swell = 1.0 + bassC * 0.5;\n" +
+  "  float morphT = uTime * (0.5 + uMids * 0.65);\n" +
+  "\n" +
+  "  float d = 1e5;\n" +
+  "  for (int i = 0; i < 6; i++) {\n" +
+  "    vec3 c = blobPos(i, morphT);\n" +
+  "    float r = blobRadius(i, swell);\n" +
+  "    d = smin(d, sdSphere(q - c, r), k);\n" +
+  "  }\n" +
+  "  d = smin(d, sdSphere(q, 0.17 * swell), k * 0.9);\n" +
+  "\n" +
+  "  float ripple = fbm(q * 2.6 + uTime * 0.22) - 0.5;\n" +
+  "  d += ripple * (0.016 + uHighs * 0.055 + uOnset * 0.05);\n" +
+  "\n" +
+  "  return d;\n" +
+  "}\n" +
+  "\n" +
+  "vec3 calcNormal(vec3 p) {\n" +
+  "  vec2 e = vec2(1.0, -1.0) * 0.0016;\n" +
+  "  return normalize(\n" +
+  "    e.xyy * map(p + e.xyy) +\n" +
+  "    e.yyx * map(p + e.yyx) +\n" +
+  "    e.yxy * map(p + e.yxy) +\n" +
+  "    e.xxx * map(p + e.xxx));\n" +
+  "}\n" +
+  "\n" +
+  "float march(vec3 ro, vec3 rd, out float glow, out int steps) {\n" +
+  "  float t = 0.0;\n" +
+  "  glow = 0.0;\n" +
+  "  steps = 0;\n" +
+  "  for (int i = 0; i < 88; i++) {\n" +
+  "    vec3 p = ro + rd * t;\n" +
+  "    float d = map(p);\n" +
+  "    glow += exp(-max(d, 0.0) * 7.0) * 0.012;\n" +
+  "    steps = i;\n" +
+  "    if (d < 0.0009) return t;\n" +
+  "    t += d * 0.92;\n" +
+  "    if (t > 11.0) break;\n" +
+  "  }\n" +
+  "  return -1.0;\n" +
+  "}\n" +
+  "\n" +
+  "float softShadow(vec3 ro, vec3 rd) {\n" +
+  "  float res = 1.0;\n" +
+  "  float t = 0.03;\n" +
+  "  for (int i = 0; i < 16; i++) {\n" +
+  "    float d = map(ro + rd * t);\n" +
+  "    res = min(res, 12.0 * d / t);\n" +
+  "    t += clamp(d, 0.02, 0.3);\n" +
+  "    if (d < 0.001 || t > 4.5) break;\n" +
+  "  }\n" +
+  "  return clamp(res, 0.0, 1.0);\n" +
+  "}\n" +
+  "\n" +
+  "float calcAO(vec3 p, vec3 n) {\n" +
+  "  float occ = 0.0, sca = 1.0;\n" +
+  "  for (int i = 0; i < 4; i++) {\n" +
+  "    float h = 0.02 + 0.11 * float(i);\n" +
+  "    float d = map(p + n * h);\n" +
+  "    occ += (h - d) * sca;\n" +
+  "    sca *= 0.7;\n" +
+  "  }\n" +
+  "  return clamp(1.0 - 1.3 * occ, 0.0, 1.0);\n" +
+  "}\n" +
+  "\n" +
+  "vec3 palette(float t, vec3 a, vec3 b, vec3 c, vec3 d) {\n" +
+  "  return a + b * cos(6.28318 * (c * t + d));\n" +
+  "}\n" +
+  "\n" +
+  "vec3 background(vec3 rd) {\n" +
+  "  vec3 sunDir = normalize(vec3(0.5, 0.85, 0.35));\n" +
+  "  float sunDot = max(dot(rd, sunDir), 0.0);\n" +
+  "  float sun = pow(sunDot, 700.0) * 14.0;\n" +
+  "  float sunGlow = pow(sunDot, 7.0) * 0.5;\n" +
+  "\n" +
+  "  float h = smoothstep(-0.08, 0.55, rd.y);\n" +
+  "  vec3 skyTop = vec3(0.05, 0.055, 0.1) + uHighs * vec3(0.015, 0.008, -0.01);\n" +
+  "  vec3 skyHoriz = vec3(0.09, 0.07, 0.11);\n" +
+  "  vec3 ground = vec3(0.006, 0.005, 0.012);\n" +
+  "  vec3 col = mix(ground, mix(skyHoriz, skyTop, h), smoothstep(-0.25, 0.05, rd.y));\n" +
+  "\n" +
+  "  col += vec3(1.0, 0.93, 0.82) * sun;\n" +
+  "  col += vec3(0.85, 0.7, 0.55) * sunGlow;\n" +
+  "\n" +
+  "  float stars = step(0.9975, hash13(floor(rd * 800.0)));\n" +
+  "  col += stars * 0.35 * smoothstep(0.05, 0.6, rd.y);\n" +
+  "  return col;\n" +
+  "}\n" +
+  "\n" +
+  "vec3 shade(vec3 p, vec3 rd, vec3 n) {\n" +
+  "  vec3 lightDir = normalize(vec3(0.5, 0.85, 0.35));\n" +
+  "  float diff = max(dot(n, lightDir), 0.0);\n" +
+  "  float shadow = softShadow(p + n * 0.012, lightDir);\n" +
+  "  float ao = calcAO(p, n);\n" +
+  "\n" +
+  "  float ndv = clamp(dot(n, -rd), 0.0, 1.0);\n" +
+  "  float ripple = fbm(p * 2.6 + uTime * 0.22) - 0.5;\n" +
+  "\n" +
+  "  // deep jewel-tone base colour, hue walking slowly over time and shifting\n" +
+  "  // warmer with the highs; the ripple field mottles it like marbled glass.\n" +
+  "  float hueShift = uHighs * 0.6;\n" +
+  "  float tCol = 0.46 + 0.16 * sin(uTime * 0.035) + hueShift * 0.3 + ripple * 0.3;\n" +
+  "  vec3 col = palette(tCol,\n" +
+  "    vec3(0.16, 0.12, 0.24), vec3(0.5, 0.42, 0.48),\n" +
+  "    vec3(1.0, 0.9, 0.7), vec3(0.18 + hueShift, 0.38, 0.6));\n" +
+  "\n" +
+  "  // thin-film iridescence: hue walks further with the grazing angle\n" +
+  "  float filmT = tCol + (1.0 - ndv) * 0.55;\n" +
+  "  vec3 filmCol = palette(filmT,\n" +
+  "    vec3(0.16, 0.12, 0.24), vec3(0.5, 0.42, 0.48),\n" +
+  "    vec3(1.0, 0.9, 0.7), vec3(0.18 + hueShift, 0.38, 0.6));\n" +
+  "  col = mix(col, filmCol, 0.55);\n" +
+  "\n" +
+  "  vec3 reflDir = reflect(rd, n);\n" +
+  "  vec3 reflCol = background(reflDir);\n" +
+  "\n" +
+  "  // low, warm ambient; contrast comes from the shadowed key light, not fill\n" +
+  "  vec3 ambient = vec3(0.012, 0.011, 0.02);\n" +
+  "  vec3 lit = col * (ambient + diff * shadow * vec3(1.05, 1.0, 0.92) * 1.55) * ao;\n" +
+  "\n" +
+  "  // chrome/glass: always part reflective, strongly more so at grazing angles\n" +
+  "  float fresnel = pow(1.0 - ndv, 2.1);\n" +
+  "  float reflectAmt = clamp(0.16 + fresnel * 0.82, 0.0, 0.95);\n" +
+  "  vec3 base = mix(lit, reflCol * (0.85 + uHighs * 0.3), reflectAmt);\n" +
+  "\n" +
+  "  vec3 halfV = normalize(-rd + lightDir);\n" +
+  "  float spec = pow(max(dot(n, halfV), 0.0), 90.0 + uHighs * 260.0);\n" +
+  "  base += spec * (0.8 + uHighs * 2.2) * vec3(1.0, 0.97, 0.9) * ao * shadow;\n" +
+  "\n" +
+  "  return base;\n" +
+  "}\n" +
+  "\n" +
+  "void main() {\n" +
+  "  vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;\n" +
+  "\n" +
+  "  float az = uTime * (0.045 + uMids * 0.03) + uCamSpin;\n" +
+  "  float el = 0.3 + 0.1 * sin(uTime * 0.045) + uBass * 0.05;\n" +
+  "  float dist = 4.6 - uBass * 0.35;\n" +
+  "\n" +
+  "  vec3 ro = vec3(dist * cos(az) * cos(el), dist * sin(el), dist * sin(az) * cos(el));\n" +
+  "  vec3 ta = vec3(0.0, 0.02, 0.0);\n" +
+  "  vec3 fwd = normalize(ta - ro);\n" +
+  "  vec3 right = normalize(cross(fwd, vec3(0.0, 1.0, 0.0)));\n" +
+  "  vec3 up = cross(right, fwd);\n" +
+  "  float fov = 1.15;\n" +
+  "  vec3 rd = normalize(fwd * fov + uv.x * right + uv.y * up);\n" +
+  "\n" +
+  "  float glow;\n" +
+  "  int steps;\n" +
+  "  float t = march(ro, rd, glow, steps);\n" +
+  "\n" +
+  "  vec3 col;\n" +
+  "  if (t > 0.0) {\n" +
+  "    vec3 p = ro + rd * t;\n" +
+  "    vec3 n = calcNormal(p);\n" +
+  "    col = shade(p, rd, n);\n" +
+  "  } else {\n" +
+  "    col = background(rd);\n" +
+  "  }\n" +
+  "  col += glow * vec3(0.5, 0.6, 1.0) * (0.5 + uHighs * 1.0);\n" +
+  "  col *= 1.0 + uOnset * 0.45;\n" +
+  "\n" +
+  "  float vig = smoothstep(1.05, 0.25, length(uv));\n" +
+  "  col *= mix(0.72, 1.0, vig);\n" +
+  "\n" +
+  "  col = col / (1.0 + col);\n" +
+  "  col = pow(max(col, 0.0), vec3(0.4545));\n" +
+  "\n" +
+  "  fragColor = vec4(col, 1.0);\n" +
+  "}\n";
+
+  var vs = compileShader(VERT_SRC, gl.VERTEX_SHADER);
+  var fs = compileShader(FRAG_SRC, gl.FRAGMENT_SHADER);
+  var program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error("Program link error: " + gl.getProgramInfoLog(program));
+  }
+  gl.useProgram(program);
+
+  var uResolutionLoc = gl.getUniformLocation(program, "uResolution");
+  var uTimeLoc = gl.getUniformLocation(program, "uTime");
+  var uBassLoc = gl.getUniformLocation(program, "uBass");
+  var uMidsLoc = gl.getUniformLocation(program, "uMids");
+  var uHighsLoc = gl.getUniformLocation(program, "uHighs");
+  var uOnsetLoc = gl.getUniformLocation(program, "uOnset");
+  var uBassSwellLoc = gl.getUniformLocation(program, "uBassSwell");
+  var uCamSpinLoc = gl.getUniformLocation(program, "uCamSpin");
+  var uPlayingLoc = gl.getUniformLocation(program, "uPlaying");
+
+  // a VAO is required to be bound in WebGL2 even with zero attributes
+  var vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  // ---------- resize: render at reduced internal resolution, CSS upscales ----------
+  var RENDER_SCALE = 0.68;
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2.0);
+    var cssW = window.innerWidth;
+    var cssH = window.innerHeight;
+    var w = Math.max(1, Math.round(cssW * dpr * RENDER_SCALE));
+    var h = Math.max(1, Math.round(cssH * dpr * RENDER_SCALE));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+  }
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", resize);
+  resize();
+
+  // ---------- audio graph ----------
+  var audioEl = document.createElement("audio");
+  audioEl.preload = "auto";
+  audioEl.crossOrigin = "anonymous";
+
+  var audioCtx = null, analyser = null, mediaSource = null;
+  var freqData = null, timeData = null;
+  var isPlaying = false;
+  var currentTrack = 0;
+
+  function ensureGraph() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.5;
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    timeData = new Uint8Array(analyser.fftSize);
+    mediaSource = audioCtx.createMediaElementSource(audioEl);
+    mediaSource.connect(analyser);
+    analyser.connect(audioCtx.destination);
+  }
+
+  function trackUrl(baseIndex, file) {
+    return AUDIO_BASES[baseIndex] + file + ".mp3";
+  }
+
+  function setTrack(index, autoplay) {
+    currentTrack = index;
+    var file = TRACKS[index].file;
+    var baseIndex = 0;
+    audioEl.src = trackUrl(baseIndex, file);
+    var onErr2 = function () { setStatus("track failed to load: " + file); };
+    var onErr = function () {
+      baseIndex++;
+      if (baseIndex < AUDIO_BASES.length) {
+        audioEl.removeEventListener("error", onErr);
+        audioEl.src = trackUrl(baseIndex, file);
+        audioEl.addEventListener("error", onErr2, { once: true });
+        if (autoplay) audioEl.play().catch(function () {});
+      } else {
+        setStatus("track failed to load: " + file);
+      }
+    };
+    audioEl.addEventListener("error", onErr, { once: true });
+    audioEl.load();
+    if (autoplay) audioEl.play().catch(function () {});
+    updateHud();
+    if (trackSelect) trackSelect.value = String(index);
+  }
+
+  function play() {
+    ensureGraph();
+    if (!audioEl.src) setTrack(currentTrack, false);
+    audioCtx.resume();
+    audioEl.play().then(function () {
+      isPlaying = true;
+      updateHud();
+    }).catch(function (err) {
+      setStatus("playback blocked: " + err.message);
+    });
+  }
+  function pause() {
+    audioEl.pause();
+    isPlaying = false;
+    updateHud();
+  }
+  function togglePlay() {
+    if (isPlaying) pause(); else play();
+  }
+
+  audioEl.addEventListener("ended", function () {
+    var next = (currentTrack + 1) % TRACKS.length;
+    setTrack(next, true);
+  });
+
+  function updateHud() {
+    var label = TRACKS[currentTrack].label;
+    hudTitle.textContent = (isPlaying ? "▸ " : "‖ ") + label;
+    setStatus(isPlaying ? "playing — " + label : "paused");
+  }
+
+  // ---------- overlay / interaction ----------
+  var overlay = document.getElementById("overlay");
+  var started = false;
+  function startFromOverlay() {
+    if (started) return;
+    started = true;
+    overlay.classList.add("hidden");
+    play();
+  }
+  overlay.addEventListener("click", startFromOverlay);
+
+  canvas.addEventListener("click", function () {
+    if (!started) { startFromOverlay(); return; }
+    togglePlay();
+  });
+
+  // ---------- track picker (compact dropdown — fits all viewports) ----------
+  var trackSelect = document.getElementById("trackSelect");
+  TRACKS.forEach(function (t, i) {
+    var opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = t.label;
+    trackSelect.appendChild(opt);
+  });
+  trackSelect.value = "0";
+  trackSelect.addEventListener("click", function (e) { e.stopPropagation(); });
+  trackSelect.addEventListener("change", function () {
+    var i = parseInt(trackSelect.value, 10);
+    ensureGraph();
+    setTrack(i, true);
+    if (!started) { started = true; overlay.classList.add("hidden"); }
+    audioCtx.resume();
+    audioEl.play().then(function () {
+      isPlaying = true;
+      updateHud();
+    }).catch(function (err) {
+      setStatus("playback blocked: " + err.message);
+    });
+  });
+
+  updateHud();
+  setTrack(0, false); // preload default source (not playing)
+
+  // ---------- envelope-followed + auto-gain band energies ----------
+  var bass = 0, mids = 0, highs = 0;
+  var bassPeak = 0.14, midsPeak = 0.14, highsPeak = 0.1;
+  var PEAK_DECAY = 0.996;
+  var FLOOR = { bass: 0.07, mids: 0.045, highs: 0.03 };
+  var bassNorm = 0, midsNorm = 0, highsNorm = 0;
+  var bassBaseline = 0, onsetPulse = 0, onsetPrev = 0;
+  var bassSwell = 0; // relative swell above the local baseline — drives merge/split, not just loudness
+  var camSpin = 0;
+
+  function follow(prev, target) {
+    var k = target > prev ? 0.55 : 0.08;
+    return prev + (target - prev) * k;
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function updateAudioData() {
+    analyser.getByteFrequencyData(freqData);
+    analyser.getByteTimeDomainData(timeData);
+
+    var bassSum = 0, bassCount = 0;
+    var midSum = 0, midCount = 0;
+    var highSum = 0, highCount = 0;
+    for (var i = 0; i < freqData.length; i++) {
+      var v = freqData[i];
+      if (i < 10) { bassSum += v; bassCount++; }
+      else if (i < 80) { midSum += v; midCount++; }
+      else { highSum += v; highCount++; }
+    }
+    var bassT = (bassCount ? bassSum / bassCount : 0) / 255;
+    var midT = (midCount ? midSum / midCount : 0) / 255;
+    var highT = (highCount ? highSum / highCount : 0) / 255;
+    bass = follow(bass, bassT);
+    mids = follow(mids, midT);
+    highs = follow(highs, highT);
+
+    bassPeak = Math.max(bassT, bassPeak * PEAK_DECAY);
+    midsPeak = Math.max(midT, midsPeak * PEAK_DECAY);
+    highsPeak = Math.max(highT, highsPeak * PEAK_DECAY);
+    bassNorm = clamp(bass / Math.max(bassPeak, FLOOR.bass), 0, 1.25);
+    midsNorm = clamp(mids / Math.max(midsPeak, FLOOR.mids), 0, 1.25);
+    highsNorm = clamp(highs / Math.max(highsPeak, FLOOR.highs), 0, 1.25);
+
+    bassBaseline += (bassT - bassBaseline) * 0.01;
+    var swellRaw = clamp((bassT - bassBaseline) * 6.0, 0, 1);
+    bassSwell += (swellRaw - bassSwell) * (swellRaw > bassSwell ? 0.5 : 0.05);
+
+    var onsetRaw = Math.max(0, bassT - bassBaseline - 0.035);
+    onsetPrev = onsetPulse;
+    onsetPulse = Math.max(onsetRaw * 3.0, onsetPulse * 0.82);
+    onsetPulse = Math.min(onsetPulse, 1.0);
+
+    // a rising onset gives the camera a tiny, soft rotational nudge —
+    // reads as a slow drift of the vantage point, never a hard cut
+    var rise = onsetPulse - onsetPrev;
+    if (rise > 0.02) camSpin += rise * 0.35;
+  }
+
+  function updateIdle(t) {
+    bassNorm = 0.12 + 0.05 * Math.sin(t * 0.13);
+    midsNorm = 0.10 + 0.04 * Math.sin(t * 0.09 + 1.3);
+    highsNorm = 0.08 + 0.035 * Math.sin(t * 0.21 + 2.1);
+    bassSwell = 0.18 + 0.16 * (0.5 + 0.5 * Math.sin(t * 0.08));
+    onsetPulse *= 0.95;
+  }
+
+  // ---------- render loop ----------
+  var startTime = performance.now();
+  function frame() {
+    resize();
+
+    var t = (performance.now() - startTime) / 1000;
+    if (isPlaying && analyser) updateAudioData();
+    else updateIdle(t);
+
+    gl.useProgram(program);
+    gl.bindVertexArray(vao);
+
+    gl.uniform2f(uResolutionLoc, canvas.width, canvas.height);
+    gl.uniform1f(uTimeLoc, t);
+    gl.uniform1f(uBassLoc, bassNorm);
+    gl.uniform1f(uMidsLoc, midsNorm);
+    gl.uniform1f(uHighsLoc, highsNorm);
+    gl.uniform1f(uOnsetLoc, onsetPulse);
+    gl.uniform1f(uBassSwellLoc, bassSwell);
+    gl.uniform1f(uCamSpinLoc, camSpin);
+    gl.uniform1f(uPlayingLoc, isPlaying ? 1.0 : 0.0);
+
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // expose a couple of things for debugging / automated checks
+  window.__viz = {
+    getBandEnergies: function () { return { bass: bassNorm, mids: midsNorm, highs: highsNorm, onset: onsetPulse, swell: bassSwell }; },
+    getFreqSum: function () {
+      if (!freqData) return 0;
+      var s = 0;
+      for (var i = 0; i < freqData.length; i++) s += freqData[i];
+      return s;
+    },
+    isPlaying: function () { return isPlaying; },
+    currentSrc: function () { return audioEl.currentSrc; },
+    currentTrack: function () { return TRACKS[currentTrack].label; },
+    play: play,
+    setTrack: setTrack
+  };
+})();
+</script>
+<script id="adina-context-guard">
+// Browsers cap the number of live WebGL contexts (~16) and drop the oldest when more tabs open one.
+// If that happens to this page, reload it the next time the tab is shown.
+(() => {
+  let lost = false;
+  document.addEventListener('webglcontextlost', (e) => { e.preventDefault(); lost = true; }, true);
+  const reloadIfLost = () => { if (lost && document.visibilityState === 'visible') location.reload(); };
+  document.addEventListener('visibilitychange', reloadIfLost);
+  window.addEventListener('focus', reloadIfLost);
+})();
+</script>
+</body>
+</html>

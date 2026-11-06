@@ -1,0 +1,845 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Kaleidoscope — audio-reactive video feedback</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    width: 100%;
+    background: #050507;
+    color: #e8e8ea;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+  }
+  body { position: relative; }
+
+  canvas#gl {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    cursor: pointer;
+  }
+
+  .back-link {
+    position: fixed;
+    top: 16px;
+    left: 18px;
+    font-size: 13px;
+    letter-spacing: .02em;
+    color: #9a9a9f;
+    text-decoration: none;
+    z-index: 30;
+    text-shadow: 0 1px 6px rgba(0,0,0,0.9);
+  }
+  .back-link:hover { color: #fff; }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: rgba(4,4,7,0.6);
+    backdrop-filter: blur(3px);
+    cursor: pointer;
+    transition: opacity .5s ease;
+    z-index: 25;
+    text-align: center;
+    padding: 20px;
+  }
+  .overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .play-ring {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    border: 1px solid rgba(232,232,234,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+  }
+  .play-ring svg { width: 18px; height: 18px; fill: #e8e8ea; margin-left: 3px; }
+  .overlay .label {
+    font-size: 14px;
+    letter-spacing: .03em;
+    color: #e8e8ea;
+  }
+  .overlay .sub {
+    font-size: 12px;
+    color: #a3a3a8;
+    max-width: 24em;
+    line-height: 1.5;
+  }
+
+  .bottom-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 16px 9px;
+    background: linear-gradient(to top, rgba(4,4,7,0.78) 0%, rgba(4,4,7,0.4) 70%, rgba(4,4,7,0) 100%);
+    pointer-events: none;
+  }
+  .bottom-bar > * { pointer-events: auto; }
+
+  .caption {
+    text-align: center;
+    max-width: min(92vw, 560px);
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.4;
+    color: #9a9a9f;
+    letter-spacing: .01em;
+  }
+
+  .tracks {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 5px;
+    max-width: 94vw;
+  }
+  .track-btn {
+    appearance: none;
+    background: rgba(10,10,13,0.5);
+    border: 1px solid #333338;
+    color: #a3a3a8;
+    font-size: 10.5px;
+    letter-spacing: .02em;
+    padding: 4px 10px;
+    border-radius: 100px;
+    cursor: pointer;
+    transition: border-color .15s, color .15s, background .15s;
+    white-space: nowrap;
+  }
+  .track-btn:hover { color: #e8e8ea; border-color: #55555c; }
+  .track-btn.active {
+    color: #050507;
+    background: #e8e8ea;
+    border-color: #e8e8ea;
+  }
+
+  .status {
+    position: fixed;
+    bottom: 10px;
+    right: 14px;
+    font-size: 10.5px;
+    color: #55555a;
+    letter-spacing: .02em;
+    z-index: 20;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+  }
+</style>
+</head>
+<body>
+
+  <a class="back-link" href="/experiments/">&larr; experiments</a>
+
+  <canvas id="gl"></canvas>
+
+  <div class="overlay" id="overlay">
+    <div class="play-ring"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
+    <div class="label">click to play</div>
+    <div class="sub">a video-feedback kaleidoscope, driven entirely by the music &mdash; no mouse needed.</div>
+  </div>
+
+  <div class="bottom-bar">
+    <p class="caption">Kaleidoscope feedback &mdash; mirrored, zoomed and bass-stamped with her face. Click to play/pause.</p>
+    <div class="tracks" id="tracks"></div>
+  </div>
+
+  <div class="status" id="status">idle</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- tracks ----------
+  var TRACKS = [
+    { file: "droplet",        label: "Droplet" },
+    { file: "arvegods",       label: "Arvegods" },
+    { file: "tystnadens-ro",  label: "Tystnadens ro" },
+    { file: "canis-major",    label: "Canis Major" },
+    { file: "scyphozoa",      label: "Scyphozoa" },
+    { file: "maxima-minima",  label: "Maxima Minima" }
+  ];
+  var AUDIO_BASES = ["/audio/", "/public/audio/"];
+  var IMAGE_CANDIDATES = ["/public/images/home-about.webp", "/images/home-about.webp"];
+
+  var statusEl = document.getElementById("status");
+  function setStatus(s) { statusEl.textContent = s; }
+
+  // ---------- canvas / gl ----------
+  var canvas = document.getElementById("gl");
+  var gl = canvas.getContext("webgl2", { antialias: false, premultipliedAlpha: false, alpha: false });
+  if (!gl) {
+    setStatus("WebGL2 unavailable");
+    throw new Error("WebGL2 not supported");
+  }
+
+  function compileShader(src, type) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      var log = gl.getShaderInfoLog(sh);
+      gl.deleteShader(sh);
+      throw new Error("Shader compile error: " + log);
+    }
+    return sh;
+  }
+  function linkProgram(vsSrc, fsSrc) {
+    var vs = compileShader(vsSrc, gl.VERTEX_SHADER);
+    var fs = compileShader(fsSrc, gl.FRAGMENT_SHADER);
+    var p = gl.createProgram();
+    gl.attachShader(p, vs);
+    gl.attachShader(p, fs);
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      throw new Error("Program link error: " + gl.getProgramInfoLog(p));
+    }
+    return p;
+  }
+
+  var VERT_SRC = [
+    "#version 300 es",
+    "void main() {",
+    "  vec2 pos = vec2(",
+    "    (gl_VertexID == 2) ? 3.0 : -1.0,",
+    "    (gl_VertexID == 1) ? 3.0 : -1.0",
+    "  );",
+    "  gl_Position = vec4(pos, 0.0, 1.0);",
+    "}"
+  ].join("\n");
+
+  var COLOR_FUNCS = [
+    "vec3 rgb2hsv(vec3 c) {",
+    "  vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);",
+    "  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));",
+    "  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));",
+    "  float d = q.x - min(q.w, q.y);",
+    "  float e = 1.0e-10;",
+    "  return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);",
+    "}",
+    "vec3 hsv2rgb(vec3 c) {",
+    "  vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);",
+    "  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);",
+    "  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);",
+    "}",
+    "float hash(vec2 p) {",
+    "  p = fract(p * vec2(123.34, 456.21));",
+    "  p += dot(p, p + 45.32);",
+    "  return fract(p.x * p.y);",
+    "}"
+  ].join("\n");
+
+  // ---------- feedback pass: reads previous frame + portrait, writes a new frame ----------
+  var FEEDBACK_FRAG = [
+    "#version 300 es",
+    "precision highp float;",
+    "precision highp sampler2D;",
+    "",
+    "uniform sampler2D uPrev;",
+    "uniform sampler2D uPortrait;",
+    "uniform vec2 uResolution;",
+    "uniform float uTime;",
+    "uniform vec2 uCenter;",
+    "uniform float uZoom;",
+    "uniform float uRotate;",
+    "uniform float uSwirl;",
+    "uniform float uDecay;",
+    "uniform float uHueShift;",
+    "uniform float uStampWeight;",
+    "uniform float uMirrorWeight;",
+    "uniform float uSegments;",
+    "uniform float uKaleidoRotate;",
+    "uniform float uSparkle;",
+    "",
+    "out vec4 fragColor;",
+    "",
+    COLOR_FUNCS,
+    "",
+    "mat2 rot2(float a) { float s = sin(a), c = cos(a); return mat2(c, -s, s, c); }",
+    "",
+    "void main() {",
+    "  vec2 uv = gl_FragCoord.xy / uResolution;",
+    "  float aspect = uResolution.x / uResolution.y;",
+    "  vec2 av = aspect > 1.0 ? vec2(aspect, 1.0) : vec2(1.0, 1.0 / aspect);",
+    "",
+    "  // ---- feedback transform: zoom + rotate + swirl around uCenter ----",
+    "  vec2 p = (uv - uCenter) * av;",
+    "  p = rot2(uRotate) * p;",
+    "  float r = length(p);",
+    "  p = rot2(uSwirl * exp(-r * 3.0)) * p;",
+    "  p *= uZoom;",
+    "  vec2 prevUV = uCenter + p / av;",
+    "  vec3 prevCol = texture(uPrev, prevUV).rgb;",
+    "",
+    "  prevCol *= uDecay;",
+    "  vec3 hsv = rgb2hsv(prevCol);",
+    "  hsv.x = fract(hsv.x + uHueShift);",
+    "  hsv.y = clamp(hsv.y * 1.01, 0.0, 1.0);",
+    "  prevCol = hsv2rgb(hsv);",
+    "",
+    "  // ---- a clean, undistorted (cover-mapped) sample of the portrait — always centred on the frame,",
+    "  // regardless of uCenter, so a recognisable face is what gets stamped in ----",
+    "  vec2 cc = uv - 0.5;",
+    "  if (aspect > 1.0) cc.x *= aspect; else cc.y /= aspect;",
+    "  vec3 cleanCol = texture(uPortrait, cc + 0.5).rgb;",
+    "",
+    "  // ---- kaleidoscope fold of the portrait, centred on uCenter — a low-level mirrored texture",
+    "  // mixed continuously into the trails, giving the tunnel its mandala structure ----",
+    "  vec2 kp = (uv - uCenter) * av;",
+    "  float kr = length(kp);",
+    "  float ka = atan(kp.y, kp.x) + uKaleidoRotate;",
+    "  float segAngle = 6.28318530718 / uSegments;",
+    "  ka = mod(ka, segAngle);",
+    "  ka = abs(ka - segAngle * 0.5);",
+    "  vec2 folded = kr * vec2(cos(ka), sin(ka));",
+    "  vec2 portraitUV = uCenter + folded;", // deliberately NOT divided by av: this performs a cover-style
+                                              // square-texture mapping onto the (possibly non-square) canvas
+    "  vec3 mirrorCol = texture(uPortrait, portraitUV).rgb;",
+    "",
+    "  vec3 col = mix(prevCol, mirrorCol, clamp(uMirrorWeight, 0.0, 0.7));",
+    "  col = mix(col, cleanCol, clamp(uStampWeight, 0.0, 0.96));",
+    "",
+    "  float sp = hash(uv * uResolution.xy * 0.6 + uTime * 41.0);",
+    "  col += uSparkle * pow(sp, 10.0) * vec3(1.0, 0.95, 0.85);",
+    "",
+    "  fragColor = vec4(col, 1.0);",
+    "}"
+  ].join("\n");
+
+  // ---------- display pass: composite to screen ----------
+  var DISPLAY_FRAG = [
+    "#version 300 es",
+    "precision highp float;",
+    "uniform sampler2D uTex;",
+    "uniform vec2 uResolution;",
+    "out vec4 fragColor;",
+    "void main() {",
+    "  vec2 uv = gl_FragCoord.xy / uResolution;",
+    "  vec3 col = texture(uTex, uv).rgb;",
+    "  col = col / (1.0 + 0.18 * col);", // gentle tonemap, keeps feedback bloom from blowing out
+    "  float vig = smoothstep(1.05, 0.25, length(uv - 0.5));",
+    "  col *= mix(0.78, 1.0, vig);",
+    "  fragColor = vec4(col, 1.0);",
+    "}"
+  ].join("\n");
+
+  // ---------- reset pass: clean, undistorted, centred portrait (used to (re)seed the FBOs) ----------
+  var RESET_FRAG = [
+    "#version 300 es",
+    "precision highp float;",
+    "uniform sampler2D uPortrait;",
+    "uniform vec2 uResolution;",
+    "out vec4 fragColor;",
+    "void main() {",
+    "  vec2 uv = gl_FragCoord.xy / uResolution;",
+    "  float aspect = uResolution.x / uResolution.y;",
+    "  vec2 c = uv - 0.5;",
+    "  if (aspect > 1.0) c.x *= aspect; else c.y /= aspect;",
+    "  vec2 puv = c + 0.5;",
+    "  fragColor = vec4(texture(uPortrait, puv).rgb, 1.0);",
+    "}"
+  ].join("\n");
+
+  var feedbackProgram = linkProgram(VERT_SRC, FEEDBACK_FRAG);
+  var displayProgram = linkProgram(VERT_SRC, DISPLAY_FRAG);
+  var resetProgram = linkProgram(VERT_SRC, RESET_FRAG);
+
+  var FB = {
+    uPrev: gl.getUniformLocation(feedbackProgram, "uPrev"),
+    uPortrait: gl.getUniformLocation(feedbackProgram, "uPortrait"),
+    uResolution: gl.getUniformLocation(feedbackProgram, "uResolution"),
+    uTime: gl.getUniformLocation(feedbackProgram, "uTime"),
+    uCenter: gl.getUniformLocation(feedbackProgram, "uCenter"),
+    uZoom: gl.getUniformLocation(feedbackProgram, "uZoom"),
+    uRotate: gl.getUniformLocation(feedbackProgram, "uRotate"),
+    uSwirl: gl.getUniformLocation(feedbackProgram, "uSwirl"),
+    uDecay: gl.getUniformLocation(feedbackProgram, "uDecay"),
+    uHueShift: gl.getUniformLocation(feedbackProgram, "uHueShift"),
+    uStampWeight: gl.getUniformLocation(feedbackProgram, "uStampWeight"),
+    uMirrorWeight: gl.getUniformLocation(feedbackProgram, "uMirrorWeight"),
+    uSegments: gl.getUniformLocation(feedbackProgram, "uSegments"),
+    uKaleidoRotate: gl.getUniformLocation(feedbackProgram, "uKaleidoRotate"),
+    uSparkle: gl.getUniformLocation(feedbackProgram, "uSparkle")
+  };
+  var DP = {
+    uTex: gl.getUniformLocation(displayProgram, "uTex"),
+    uResolution: gl.getUniformLocation(displayProgram, "uResolution")
+  };
+  var RP = {
+    uPortrait: gl.getUniformLocation(resetProgram, "uPortrait"),
+    uResolution: gl.getUniformLocation(resetProgram, "uResolution")
+  };
+
+  var vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  // ---------- portrait texture ----------
+  var portraitTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, portraitTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([20, 20, 24, 255]));
+
+  var portraitReady = false;
+  function loadPortrait(i) {
+    if (i >= IMAGE_CANDIDATES.length) {
+      setStatus("portrait failed to load");
+      return;
+    }
+    var img = new Image();
+    img.onload = function () {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, portraitTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      portraitReady = true;
+      seedFBOs();
+    };
+    img.onerror = function () { loadPortrait(i + 1); };
+    img.src = IMAGE_CANDIDATES[i];
+  }
+  loadPortrait(0);
+
+  // ---------- ping-pong framebuffers ----------
+  var fboPair = [null, null];
+  var readIdx = 0, writeIdx = 1;
+  var fboW = 0, fboH = 0;
+
+  function createFBO(w, h) {
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    var fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { fbo: fbo, tex: tex };
+  }
+  function destroyFBO(f) {
+    if (!f) return;
+    gl.deleteFramebuffer(f.fbo);
+    gl.deleteTexture(f.tex);
+  }
+
+  function drawFullscreen() {
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  function seedFBOs() {
+    if (!fboPair[0] || !fboPair[1] || !portraitReady) return;
+    gl.useProgram(resetProgram);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, portraitTex);
+    gl.uniform1i(RP.uPortrait, 0);
+    gl.uniform2f(RP.uResolution, fboW, fboH);
+    gl.viewport(0, 0, fboW, fboH);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboPair[0].fbo);
+    drawFullscreen();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboPair[1].fbo);
+    drawFullscreen();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  function ensureFBOs(w, h) {
+    if (w === fboW && h === fboH && fboPair[0] && fboPair[1]) return;
+    destroyFBO(fboPair[0]);
+    destroyFBO(fboPair[1]);
+    fboPair[0] = createFBO(w, h);
+    fboPair[1] = createFBO(w, h);
+    fboW = w; fboH = h;
+    readIdx = 0; writeIdx = 1;
+    seedFBOs();
+  }
+
+  // ---------- resize ----------
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = Math.max(1, Math.round(window.innerWidth * dpr));
+    var h = Math.max(1, Math.round(window.innerHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    ensureFBOs(w, h);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ---------- audio graph ----------
+  var audioEl = document.createElement("audio");
+  audioEl.loop = true;
+  audioEl.preload = "auto";
+  audioEl.crossOrigin = "anonymous";
+
+  var audioCtx = null, analyser = null, mediaSource = null;
+  var freqData = null, timeData = null;
+  var isPlaying = false;
+  var currentTrack = 0;
+
+  function ensureGraph() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024; // -> 512 frequency bins
+    analyser.smoothingTimeConstant = 0.5;
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    timeData = new Uint8Array(analyser.fftSize);
+    mediaSource = audioCtx.createMediaElementSource(audioEl);
+    mediaSource.connect(analyser);
+    analyser.connect(audioCtx.destination);
+  }
+
+  function trackUrl(baseIndex, file) {
+    return AUDIO_BASES[baseIndex] + file + ".mp3";
+  }
+
+  function setTrack(index, autoplay) {
+    currentTrack = index;
+    var file = TRACKS[index].file;
+    var baseIndex = 0;
+    audioEl.src = trackUrl(baseIndex, file);
+    var onErr2 = function () { setStatus("track failed to load: " + file); };
+    var onErr = function () {
+      baseIndex++;
+      if (baseIndex < AUDIO_BASES.length) {
+        audioEl.removeEventListener("error", onErr);
+        audioEl.src = trackUrl(baseIndex, file);
+        audioEl.addEventListener("error", onErr2, { once: true });
+        if (autoplay) audioEl.play().catch(function () {});
+      } else {
+        setStatus("track failed to load: " + file);
+      }
+    };
+    audioEl.addEventListener("error", onErr, { once: true });
+    audioEl.load();
+    if (autoplay) audioEl.play().catch(function () {});
+    updateTrackButtons();
+  }
+
+  function play() {
+    ensureGraph();
+    if (!audioEl.src) setTrack(currentTrack, false);
+    audioCtx.resume();
+    audioEl.play().then(function () {
+      isPlaying = true;
+      setStatus("playing — " + TRACKS[currentTrack].label);
+    }).catch(function (err) {
+      setStatus("playback blocked: " + err.message);
+    });
+  }
+  function pause() {
+    audioEl.pause();
+    isPlaying = false;
+    setStatus("paused");
+  }
+  function togglePlay() {
+    if (isPlaying) pause(); else play();
+  }
+
+  // ---------- overlay / interaction (audio playback only — no pointer-driven visuals) ----------
+  var overlay = document.getElementById("overlay");
+  var started = false;
+  function startFromOverlay() {
+    if (started) return;
+    started = true;
+    overlay.classList.add("hidden");
+    play();
+  }
+  overlay.addEventListener("click", startFromOverlay);
+
+  canvas.addEventListener("click", function () {
+    if (!started) { startFromOverlay(); return; }
+    togglePlay();
+  });
+
+  // ---------- track picker ----------
+  var tracksEl = document.getElementById("tracks");
+  var trackButtons = [];
+  TRACKS.forEach(function (t, i) {
+    var btn = document.createElement("button");
+    btn.className = "track-btn";
+    btn.type = "button";
+    btn.textContent = t.label;
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      ensureGraph();
+      setTrack(i, true);
+      if (!started) { started = true; overlay.classList.add("hidden"); }
+      audioCtx.resume();
+      audioEl.play().then(function () {
+        isPlaying = true;
+        setStatus("playing — " + TRACKS[i].label);
+      }).catch(function (err) {
+        setStatus("playback blocked: " + err.message);
+      });
+    });
+    tracksEl.appendChild(btn);
+    trackButtons.push(btn);
+  });
+  function updateTrackButtons() {
+    trackButtons.forEach(function (b, i) {
+      b.classList.toggle("active", i === currentTrack);
+    });
+  }
+  updateTrackButtons();
+
+  // preload default track source (not playing) so first click is instant-ish
+  setTrack(0, false);
+
+  // ---------- adaptive gain per band (so quiet, sparse tracks still read clearly) ----------
+  function makeBandState() { return { max: 0.04, env: 0.0 }; }
+  var bassState = makeBandState(), midState = makeBandState(), highState = makeBandState();
+  var AGC_FLOOR = 0.012;
+  var AGC_HALFLIFE = 1.3; // seconds
+
+  function updateAGC(state, raw, dt) {
+    var decay = Math.pow(0.5, dt / AGC_HALFLIFE);
+    state.max = Math.max(state.max * decay, raw);
+    var denom = Math.max(state.max, AGC_FLOOR);
+    var norm = Math.min(raw / denom, 1.25);
+    var k = norm > state.env ? 0.5 : 0.085;
+    state.env += (norm - state.env) * k;
+    return state.env;
+  }
+
+  var bass = 0, mids = 0, highs = 0;
+
+  // ---------- spectral-flux onset detection (drives kaleidoscope segment changes) ----------
+  var prevSpectrum = null;
+  var fluxMean = 0.02;
+  var lastOnsetAt = -10;
+  var SEGMENT_OPTIONS = [3, 4, 5, 6, 6, 8, 8, 10, 12];
+  var segments = 6;
+  var segmentsTarget = 6;
+
+  // ---------- bass/kick detector (fast vs. slow envelope) — drives the zoom pulse + portrait stamp ----------
+  var bassFast = 0, bassSlow = 0.02;
+  var lastKickAt = -10;
+  var kickPunch = 0;
+
+  // ---------- slower "swell"/"breathing" detector — relative energy rise + a periodic fallback timer,
+  // so the face still emerges and dissolves every several seconds even on a steady, eventless track ----------
+  var energyShort = 0, energyLong = 0;
+  var lastSwellAt = -10;
+  var nextBreathAt = 5 + Math.random() * 3;
+  var swellEnvelope = 0;
+
+  function updateAudioData(dt, nowSec) {
+    if (!analyser) { bass = 0; mids = 0; highs = 0; return false; }
+    analyser.getByteFrequencyData(freqData);
+    analyser.getByteTimeDomainData(timeData);
+
+    var n = freqData.length; // 512
+    if (!prevSpectrum) prevSpectrum = new Float32Array(n);
+
+    var bassSum = 0, bassN = 0, midSum = 0, midN = 0, highSum = 0, highN = 0;
+    var flux = 0;
+    for (var i = 0; i < n; i++) {
+      var v = freqData[i];
+      if (i < 20) { bassSum += v; bassN++; }
+      else if (i < 160) { midSum += v; midN++; }
+      else { highSum += v; highN++; }
+      var vn = v / 255;
+      var diff = vn - prevSpectrum[i];
+      if (diff > 0) flux += diff;
+      prevSpectrum[i] = vn;
+    }
+    var bassRaw = (bassN ? bassSum / bassN : 0) / 255;
+    var midRaw = (midN ? midSum / midN : 0) / 255;
+    var highRaw = (highN ? highSum / highN : 0) / 255;
+
+    bass = updateAGC(bassState, bassRaw, dt);
+    mids = updateAGC(midState, midRaw, dt);
+    highs = updateAGC(highState, highRaw, dt);
+
+    // onsets (full-spectrum) -> occasionally change the kaleidoscope segment count
+    fluxMean += (flux - fluxMean) * 0.02;
+    var isOnset = flux > fluxMean * 1.6 + 0.035 && (nowSec - lastOnsetAt) > 1.3;
+    if (isOnset) {
+      lastOnsetAt = nowSec;
+      segmentsTarget = SEGMENT_OPTIONS[Math.floor(Math.random() * SEGMENT_OPTIONS.length)];
+    }
+    segments += (segmentsTarget - segments) * Math.min(1, dt * 3.0);
+
+    // bass/kick -> a sharp punch that decays fast: zoom pulse + a crisp, fresh portrait stamp
+    bassFast += (bassRaw - bassFast) * 0.5;
+    bassSlow += (bassRaw - bassSlow) * 0.025;
+    var kickRaw = bassFast - bassSlow;
+    if (kickRaw > 0.05 && (nowSec - lastKickAt) > 0.14) {
+      lastKickAt = nowSec;
+      kickPunch = 1.0;
+    }
+    kickPunch *= Math.pow(0.05, dt / 0.5); // ~0.5s to fade back out
+
+    // relative-energy "swell" — a slower rise-above-recent-mean detector. Droplet's AGC'd bass sits
+    // saturated almost all the time, so an *absolute* level never fires; comparing a short envelope
+    // against a longer rolling baseline catches swells even on a sustained, near-saturated track.
+    var energyRaw = bass * 0.55 + mids * 0.3 + highs * 0.15;
+    energyShort += (energyRaw - energyShort) * 0.12;
+    energyLong += (energyRaw - energyLong) * 0.006;
+    var rel = energyShort - energyLong;
+    if (rel > 0.05 && (nowSec - lastSwellAt) > 2.2) {
+      lastSwellAt = nowSec;
+      swellEnvelope = 1.0;
+      nextBreathAt = nowSec + 6 + Math.random() * 4;
+    }
+    // a slow "breathing" timer: the face still emerges and dissolves periodically even on a
+    // steady, eventless passage, so it's never gone for too long.
+    if (nowSec > nextBreathAt) {
+      swellEnvelope = Math.max(swellEnvelope, 0.85);
+      lastSwellAt = nowSec;
+      nextBreathAt = nowSec + 6 + Math.random() * 4;
+    }
+    swellEnvelope *= Math.pow(0.02, dt / 1.7); // crisp in, ~1.7s to mostly dissolve back into trails
+
+    var anySignal = (bassSum + midSum + highSum) > 0;
+    return anySignal;
+  }
+
+  // ---------- autonomous centre drift + kaleidoscope rotation (audio-driven, no pointer) ----------
+  var kaleidoRotate = 0;
+
+  // ---------- render loop ----------
+  var startTime = performance.now();
+  var lastT = startTime;
+  function frame() {
+    var now = performance.now();
+    var dt = Math.min(0.05, (now - lastT) / 1000);
+    lastT = now;
+    var t = (now - startTime) / 1000;
+
+    resize();
+    updateAudioData(dt, t);
+
+    var energy = bass * 0.5 + mids * 0.3 + highs * 0.2; // overall audio-driven intensity
+    var active = isPlaying; // true once a track is actually playing (not just loaded/paused)
+
+    // centre drifts slowly on its own, modulated a little by the music — never by the pointer
+    var driftAmp = 0.035 + mids * 0.05;
+    var cx = 0.5 + Math.sin(t * (0.045 + mids * 0.04)) * driftAmp + Math.sin(t * 0.0137) * 0.02;
+    var cy = 0.5 + Math.cos(t * (0.037 + mids * 0.03)) * driftAmp * 0.85 + Math.cos(t * 0.0111) * 0.02;
+
+    // zoom is a *per-frame* delta (the feedback loop itself accumulates it into a tunnel over time).
+    // While playing it's strong enough to build a clearly visible zoom-tunnel on its own; at rest it's
+    // just a calm drift.
+    var zoom = active
+      ? 1.0 - (0.0020 + bass * 0.0035 + kickPunch * 0.024 + swellEnvelope * 0.01)
+      : 1.0 - 0.0006;
+    zoom = Math.max(0.948, zoom);
+    var rotate = active ? (0.0042 + mids * 0.014 + highs * 0.004) : 0.0010;
+    var swirl = active ? (0.02 + mids * 0.10) : 0.008;
+    var decay = active ? Math.max(0.958, Math.min(0.985, 0.978 - mids * 0.006)) : 0.986;
+    var hueShift = active ? (0.0009 + highs * 0.01 + mids * 0.002) : 0.0004;
+    // between beats the mirrored kaleidoscope mandala dominates; the clean face only stamps in on a
+    // kick or a slower energy "swell" (or the periodic breathing fallback), then dissolves into trails.
+    var stampWeight = active
+      ? Math.min(0.93, 0.04 + kickPunch * 0.7 + swellEnvelope * 0.75)
+      : 0.42; // no audio: calm, portrait clearly visible
+    var mirrorWeight = active
+      ? Math.min(0.68, 0.30 + highs * 0.20 + mids * 0.12)
+      : 0.14;
+    var sparkle = highs * 0.5;
+
+    kaleidoRotate += active ? (0.003 + mids * 0.012) * (1.0 + energy * 0.6) : 0.0006;
+
+    gl.useProgram(feedbackProgram);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fboPair[writeIdx].fbo);
+    gl.viewport(0, 0, fboW, fboH);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, portraitTex);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, fboPair[readIdx].tex);
+
+    gl.uniform1i(FB.uPortrait, 0);
+    gl.uniform1i(FB.uPrev, 1);
+    gl.uniform2f(FB.uResolution, fboW, fboH);
+    gl.uniform1f(FB.uTime, t);
+    gl.uniform2f(FB.uCenter, cx, cy);
+    gl.uniform1f(FB.uZoom, zoom);
+    gl.uniform1f(FB.uRotate, rotate);
+    gl.uniform1f(FB.uSwirl, swirl);
+    gl.uniform1f(FB.uDecay, decay);
+    gl.uniform1f(FB.uHueShift, hueShift);
+    gl.uniform1f(FB.uStampWeight, stampWeight);
+    gl.uniform1f(FB.uMirrorWeight, mirrorWeight);
+    gl.uniform1f(FB.uSegments, segments);
+    gl.uniform1f(FB.uKaleidoRotate, kaleidoRotate);
+    gl.uniform1f(FB.uSparkle, sparkle);
+    drawFullscreen();
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(displayProgram);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, fboPair[writeIdx].tex);
+    gl.uniform1i(DP.uTex, 0);
+    gl.uniform2f(DP.uResolution, canvas.width, canvas.height);
+    drawFullscreen();
+
+    var tmp = readIdx; readIdx = writeIdx; writeIdx = tmp;
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // expose a couple of things for debugging / automated checks
+  window.__kaleido = {
+    getBandEnergies: function () { return { bass: bass, mids: mids, highs: highs }; },
+    getFreqSum: function () {
+      if (!freqData) return 0;
+      var s = 0;
+      for (var i = 0; i < freqData.length; i++) s += freqData[i];
+      return s;
+    },
+    isPlaying: function () { return isPlaying; },
+    currentSrc: function () { return audioEl.currentSrc; },
+    currentTrack: function () { return TRACKS[currentTrack].label; }
+  };
+})();
+</script>
+<script id="adina-context-guard">
+// Browsers cap the number of live WebGL contexts (~16) and drop the oldest when more tabs open one.
+// If that happens to this page, reload it the next time the tab is shown.
+(() => {
+  let lost = false;
+  document.addEventListener('webglcontextlost', (e) => { e.preventDefault(); lost = true; }, true);
+  const reloadIfLost = () => { if (lost && document.visibilityState === 'visible') location.reload(); };
+  document.addEventListener('visibilitychange', reloadIfLost);
+  window.addEventListener('focus', reloadIfLost);
+})();
+</script>
+</body>
+</html>

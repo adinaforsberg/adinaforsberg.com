@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Experiments — adina manghi forsberg</title>
+  <meta name="robots" content="noindex">
+  <link rel="stylesheet" href="/public/css/style.css">
+  <style>
+    body { background: #0b0b0c; color: #eee; }
+    main { padding-top: 60px; }
+    .note { color: #9a9a9a; max-width: 44rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 24px; margin: 50px 0 80px; }
+    .card { display: block; padding: 22px 24px; border: 1px solid #2a2a2e; text-decoration: none; transition: border-color .2s, background .2s; }
+    .card:hover { border-color: #8a8a90; background: #141416; }
+    .card h2 { font-size: 1.35rem; margin-bottom: .35em; }
+    .card p { margin: 0; font-size: 14.5px; line-height: 1.6; color: #b5b5b5; }
+    .tag { display: inline-block; margin-top: 12px; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: #8a8a90; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Experiments</h1>
+    <p class="note">Local WebGL / WebGPU sketches starting from the portrait. Not part of the website.</p>
+
+    <div class="grid">
+      <a class="card" href="doom-melt.html">
+        <h2>Doom melt</h2>
+        <p>The 1993 screen wipe: columns of pixels fall away on hover, revealing the leaves underneath.</p>
+        <span class="tag">WebGL2 · hover</span>
+      </a>
+      <a class="card" href="fluid.html">
+        <h2>Liquid portrait</h2>
+        <p>A GPU fluid simulation stirs the image like ink in water; it slowly settles back.</p>
+        <span class="tag">WebGL2 · drag</span>
+      </a>
+      <a class="card" href="particles.html">
+        <h2>Particles</h2>
+        <p>Every pixel becomes a particle that drifts on curl noise and scatters around the cursor.</p>
+        <span class="tag">WebGL2 · mouse</span>
+      </a>
+      <a class="card" href="reaction-diffusion.html">
+        <h2>Reaction–diffusion</h2>
+        <p>Gray–Scott patterns grow across the face, shaped by its light and dark areas.</p>
+        <span class="tag">WebGPU · drag to paint</span>
+      </a>
+      <a class="card" href="audio-reactive.html">
+        <h2>Audio-reactive</h2>
+        <p>The portrait reacts to her own music, “Droplet”, through a live frequency analysis.</p>
+        <span class="tag">WebGL2 · Web Audio · audio + mouse</span>
+      </a>
+      <a class="card" href="audio-terrain.html">
+        <h2>Terrain</h2>
+        <p>The face rises as a 3D relief landscape that swells and ripples with the music.</p>
+        <span class="tag">WebGL2 · Web Audio · audio only</span>
+      </a>
+      <a class="card" href="audio-kaleidoscope.html">
+        <h2>Kaleidoscope</h2>
+        <p>Video feedback and mirrored segments bloom on the beat; the face reappears on each hit.</p>
+        <span class="tag">WebGL2 · Web Audio · audio only</span>
+      </a>
+      <a class="card" href="cymatics.html">
+        <h2>Cymatics</h2>
+        <p>Grains of “sand” leave the portrait for Chladni figures chosen by the music, then return.</p>
+        <span class="tag">WebGPU · Web Audio · audio only</span>
+      </a>
+      <a class="card" href="drum.html">
+        <h2>Drum</h2>
+        <p>Her face as sand on a 3D drum head that vibrates with the music, bouncing the grains.</p>
+        <span class="tag">WebGPU · Web Audio · audio only</span>
+      </a>
+      <a class="card" href="relief-light.html">
+        <h2>Relief light</h2>
+        <p>The photo becomes a carved surface; the cursor is a light moving across it.</p>
+        <span class="tag">WebGL2 · mouse</span>
+      </a>
+      <a class="card" href="sand.html">
+        <h2>Sand</h2>
+        <p>The face turns to sand and pours down through music staves, pegs and a funnel.</p>
+        <span class="tag">GPU sand simulation · click</span>
+      </a>
+    </div>
+
+    <h2>Visualizers</h2>
+    <p class="note">Not based on the portrait: plain visuals to watch while listening to her recordings. Audio is the only input.</p>
+    <div class="grid">
+      <a class="card" href="viz-raymarch.html">
+        <h2>Forms</h2>
+        <p>Raymarched organic shapes that swell, twist and shimmer with the music.</p>
+        <span class="tag">WebGL2 · Web Audio</span>
+      </a>
+      <a class="card" href="viz-flow.html">
+        <h2>Flow</h2>
+        <p>Around a million particles drawing glowing trails through a field shaped by the sound.</p>
+        <span class="tag">WebGPU · Web Audio</span>
+      </a>
+      <a class="card" href="viz-oscilloscope.html">
+        <h2>Oscilloscope</h2>
+        <p>A phosphor CRT beam traces the stereo signal over a waterfall of the spectrum.</p>
+        <span class="tag">WebGL2 · Web Audio</span>
+      </a>
+    </div>
+  </main>
+</body>
+</html>

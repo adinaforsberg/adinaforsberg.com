@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Particle Portrait — experiment</title>
+<style>
+  :root {
+    color-scheme: dark;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #07080d;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #stage {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    width: min(90vw, 90vh);
+    height: min(90vw, 90vh);
+    display: block;
+    touch-action: none;
+    cursor: crosshair;
+    background: #07080d;
+    box-shadow: 0 0 80px rgba(0, 0, 0, 0.6);
+  }
+  .back-link {
+    position: fixed;
+    top: 18px;
+    left: 20px;
+    color: rgba(230, 230, 235, 0.55);
+    text-decoration: none;
+    font-size: 13px;
+    letter-spacing: 0.02em;
+    z-index: 5;
+    transition: color 0.2s ease;
+  }
+  .back-link:hover {
+    color: rgba(230, 230, 235, 0.95);
+  }
+  .caption {
+    position: fixed;
+    bottom: 16px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .caption .title {
+    color: rgba(235, 235, 240, 0.8);
+    font-size: 13px;
+    letter-spacing: 0.03em;
+    font-weight: 600;
+  }
+  .caption .hint {
+    color: rgba(235, 235, 240, 0.4);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    margin-top: 2px;
+  }
+  #error {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    color: #e66;
+    font-size: 14px;
+    text-align: center;
+    padding: 2em;
+    z-index: 10;
+  }
+</style>
+</head>
+<body>
+  <a class="back-link" href="/experiments/">&larr; experiments</a>
+  <div id="stage">
+    <canvas id="gl"></canvas>
+  </div>
+  <div class="caption">
+    <div class="title">particle portrait</div>
+    <div class="hint">move the mouse through her</div>
+  </div>
+  <div id="error"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var GRID = 512;                 // GRID x GRID particles (~262k)
+  var PARTICLE_COUNT = GRID * GRID;
+  var IMAGE_SRC = "/public/images/home-about.webp";
+
+  var canvas = document.getElementById("gl");
+  var errorBox = document.getElementById("error");
+
+  function fail(msg) {
+    errorBox.style.display = "flex";
+    errorBox.textContent = msg;
+    console.error(msg);
+  }
+
+  var gl = canvas.getContext("webgl2", { antialias: false, alpha: false, preserveDrawingBuffer: false });
+  if (!gl) {
+    fail("WebGL2 is not available in this browser.");
+    return;
+  }
+  var floatExt = gl.getExtension("EXT_color_buffer_float");
+  if (!floatExt) {
+    fail("EXT_color_buffer_float is not supported; the GPGPU particle simulation needs it.");
+    return;
+  }
+  gl.getExtension("OES_texture_float_linear");
+
+  // ---------------------------------------------------------------------
+  // Shader helpers
+  // ---------------------------------------------------------------------
+  function compileShader(type, src) {
+    var s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      var info = gl.getShaderInfoLog(s);
+      gl.deleteShader(s);
+      throw new Error("Shader compile error: " + info);
+    }
+    return s;
+  }
+
+  function createProgram(vsSrc, fsSrc) {
+    var vs = compileShader(gl.VERTEX_SHADER, vsSrc);
+    var fs = compileShader(gl.FRAGMENT_SHADER, fsSrc);
+    var p = gl.createProgram();
+    gl.attachShader(p, vs);
+    gl.attachShader(p, fs);
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      var info = gl.getProgramInfoLog(p);
+      throw new Error("Program link error: " + info);
+    }
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    return p;
+  }
+
+  function uniforms(program, names) {
+    var out = {};
+    for (var i = 0; i < names.length; i++) {
+      out[names[i]] = gl.getUniformLocation(program, names[i]);
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------------
+  // Shared GLSL: hash / value-noise / curl
+  // ---------------------------------------------------------------------
+  var NOISE_GLSL = `
+    float hash(vec2 p) {
+      p = fract(p * vec2(123.34, 456.21));
+      p += dot(p, p + 45.32);
+      return fract(p.x * p.y);
+    }
+    float vnoise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      float a = hash(i);
+      float b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0));
+      float d = hash(i + vec2(1.0, 1.0));
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    }
+    float psi(vec2 p, float t) {
+      vec2 q = p * 2.2 + vec2(t * 0.06, -t * 0.05);
+      float n = vnoise(q);
+      n += 0.5 * vnoise(q * 2.1 + vec2(17.1, 9.3) + vec2(-t * 0.08, t * 0.07));
+      return n;
+    }
+    vec2 curlNoise(vec2 p, float t) {
+      float e = 0.05;
+      float n1 = psi(p + vec2(0.0, e), t);
+      float n2 = psi(p - vec2(0.0, e), t);
+      float n3 = psi(p + vec2(e, 0.0), t);
+      float n4 = psi(p - vec2(e, 0.0), t);
+      float dx = (n1 - n2) / (2.0 * e);
+      float dy = (n3 - n4) / (2.0 * e);
+      return vec2(dx, -dy);
+    }
+  `;
+
+  // ---------------------------------------------------------------------
+  // Simulation program (updates position + velocity texture)
+  // ---------------------------------------------------------------------
+  var simVS = `#version 300 es
+    void main() {
+      vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+      gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+    }
+  `;
+
+  var simFS = `#version 300 es
+    precision highp float;
+    uniform sampler2D uPosTex;
+    uniform sampler2D uHomeTex;
+    uniform float uTime;
+    uniform float uDt;
+    uniform vec2 uMouse;
+    uniform float uMouseActive;
+    uniform float uMouseRadius;
+    uniform float uMouseStrength;
+    out vec4 outState;
+
+    ${NOISE_GLSL}
+
+    void main() {
+      ivec2 texel = ivec2(gl_FragCoord.xy);
+      vec4 state = texelFetch(uPosTex, texel, 0);
+      vec4 homeData = texelFetch(uHomeTex, texel, 0);
+
+      vec2 pos = state.xy;
+      vec2 vel = state.zw;
+      vec2 home = homeData.xy;
+      float brightness = homeData.z;
+
+      // darker pixels get more freedom to drift; bright highlights stay put
+      float freedom = 1.0 - brightness * 0.55;
+
+      // idle "breath": every 10s the portrait loosens and re-forms
+      float cyclePhase = mod(uTime, 10.0);
+      float breathEnv = smoothstep(0.0, 0.15, cyclePhase) * smoothstep(2.0, 0.6, cyclePhase);
+
+      float springK = mix(110.0, 20.0, breathEnv);
+      float dragK = 9.0;
+
+      vec2 springForce = (home - pos) * springK;
+
+      // kept deliberately tiny: at rest this should only add a gentle
+      // shimmer, not visibly displace features (roughly < 1 particle
+      // spacing of wobble around home).
+      vec2 flow = curlNoise(pos, uTime) * (0.03 + freedom * 0.07);
+
+      vec2 outward = normalize(home + vec2(1e-4)) * breathEnv * 2.0 * (0.55 + freedom * 0.8);
+
+      vec2 d = pos - uMouse;
+      float dist = length(d) + 1e-5;
+      float falloff = clamp(1.0 - dist / uMouseRadius, 0.0, 1.0);
+      vec2 mouseForce = (d / dist) * falloff * falloff * uMouseStrength * uMouseActive * (0.4 + freedom * 1.1);
+
+      vec2 accel = springForce + flow + outward + mouseForce - vel * dragK;
+
+      vel += accel * uDt;
+      vel = clamp(vel, vec2(-8.0), vec2(8.0));
+      pos += vel * uDt;
+
+      outState = vec4(pos, vel);
+    }
+  `;
+
+  // ---------------------------------------------------------------------
+  // Render program (draws particles as points, colored from the photo)
+  // ---------------------------------------------------------------------
+  var renderVS = `#version 300 es
+    precision highp float;
+    uniform sampler2D uPosTex;
+    uniform sampler2D uColorTex;
+    uniform int uGrid;
+    uniform float uPointSize;
+    out vec4 vColor;
+    void main() {
+      int idx = gl_VertexID;
+      ivec2 texel = ivec2(idx % uGrid, idx / uGrid);
+      vec4 state = texelFetch(uPosTex, texel, 0);
+      vec4 col = texelFetch(uColorTex, texel, 0);
+      gl_Position = vec4(state.xy, 0.0, 1.0);
+      gl_PointSize = uPointSize;
+      vColor = col;
+    }
+  `;
+
+  var renderFS = `#version 300 es
+    precision highp float;
+    in vec4 vColor;
+    out vec4 fragColor;
+    void main() {
+      vec2 c = gl_PointCoord * 2.0 - 1.0;
+      float r2 = dot(c, c);
+      if (r2 > 1.0) discard;
+      float alpha = smoothstep(1.0, 0.15, r2);
+      fragColor = vec4(vColor.rgb, alpha);
+    }
+  `;
+
+  var simProgram = createProgram(simVS, simFS);
+  var simUniforms = uniforms(simProgram, [
+    "uPosTex", "uHomeTex", "uTime", "uDt",
+    "uMouse", "uMouseActive", "uMouseRadius", "uMouseStrength"
+  ]);
+
+  var renderProgram = createProgram(renderVS, renderFS);
+  var renderUniforms = uniforms(renderProgram, [
+    "uPosTex", "uColorTex", "uGrid", "uPointSize"
+  ]);
+
+  // empty VAO for attribute-less rendering (gl_VertexID driven)
+  var emptyVAO = gl.createVertexArray();
+  gl.bindVertexArray(emptyVAO);
+
+  // ---------------------------------------------------------------------
+  // Textures: home position + brightness (static), color (static),
+  // and ping-pong position/velocity state.
+  // ---------------------------------------------------------------------
+  function makeFloatTexture(data) {
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, GRID, GRID, 0, gl.RGBA, gl.FLOAT, data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  function makeColorTexture(data) {
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, GRID, GRID, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  function makeFBO(tex) {
+    var fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    var status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error("Framebuffer incomplete: 0x" + status.toString(16));
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return fbo;
+  }
+
+  var homeTex = null;
+  var colorTex = null;
+  var posTexA = null, posTexB = null;
+  var fboA = null, fboB = null;
+  var readTex = null, writeTex = null, readFBO = null, writeFBO = null;
+
+  function swapPingPong() {
+    var t = readTex; readTex = writeTex; writeTex = t;
+    var f = readFBO; readFBO = writeFBO; writeFBO = f;
+  }
+
+  // ---------------------------------------------------------------------
+  // Load the portrait, sample it onto a GRID x GRID grid.
+  // ---------------------------------------------------------------------
+  var img = new Image();
+  img.onload = function () {
+    try {
+      setupFromImage(img);
+      startLoop();
+    } catch (e) {
+      fail(String(e && e.message ? e.message : e));
+    }
+  };
+  img.onerror = function () {
+    fail("Could not load portrait image at " + IMAGE_SRC);
+  };
+  img.src = IMAGE_SRC;
+
+  function setupFromImage(image) {
+    var off = document.createElement("canvas");
+    off.width = GRID;
+    off.height = GRID;
+    var octx = off.getContext("2d");
+    octx.imageSmoothingEnabled = true;
+    octx.imageSmoothingQuality = "high";
+    octx.drawImage(image, 0, 0, GRID, GRID);
+    var pixels = octx.getImageData(0, 0, GRID, GRID).data;
+
+    var homeData = new Float32Array(PARTICLE_COUNT * 4);
+    var colorData = new Uint8Array(PARTICLE_COUNT * 4);
+    var initState = new Float32Array(PARTICLE_COUNT * 4);
+
+    var rand = mulberry32(0xC0FFEE);
+
+    for (var row = 0; row < GRID; row++) {
+      for (var col = 0; col < GRID; col++) {
+        var gi = row * GRID + col;
+        var pi = gi * 4;
+
+        var r = pixels[pi] / 255;
+        var g = pixels[pi + 1] / 255;
+        var b = pixels[pi + 2] / 255;
+        var brightness = 0.299 * r + 0.587 * g + 0.114 * b;
+
+        // tiny sub-pixel jitter on the home grid decorrelates it from the
+        // display's pixel grid, which avoids moire interference patterns
+        // between the two regular lattices.
+        var spacing = 2.0 / (GRID - 1);
+        var hx = -1.0 + 2.0 * (col / (GRID - 1)) + (rand() - 0.5) * spacing * 0.7;
+        var hy = 1.0 - 2.0 * (row / (GRID - 1)) + (rand() - 0.5) * spacing * 0.7;
+
+        homeData[pi] = hx;
+        homeData[pi + 1] = hy;
+        homeData[pi + 2] = brightness;
+        homeData[pi + 3] = 0.0;
+
+        colorData[pi] = pixels[pi];
+        colorData[pi + 1] = pixels[pi + 1];
+        colorData[pi + 2] = pixels[pi + 2];
+        colorData[pi + 3] = 255;
+
+        // intro: scatter particles outward from home so the portrait
+        // visibly assembles itself on load.
+        var ang = rand() * Math.PI * 2.0;
+        var rad = 0.15 + rand() * 1.6;
+        initState[pi] = hx + Math.cos(ang) * rad;
+        initState[pi + 1] = hy + Math.sin(ang) * rad;
+        initState[pi + 2] = 0.0;
+        initState[pi + 3] = 0.0;
+      }
+    }
+
+    homeTex = makeFloatTexture(homeData);
+    colorTex = makeColorTexture(colorData);
+    posTexA = makeFloatTexture(initState);
+    posTexB = makeFloatTexture(null);
+    fboA = makeFBO(posTexA);
+    fboB = makeFBO(posTexB);
+
+    readTex = posTexA; readFBO = fboA;
+    writeTex = posTexB; writeFBO = fboB;
+  }
+
+  function mulberry32(seed) {
+    var a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // ---------------------------------------------------------------------
+  // Pointer tracking
+  // ---------------------------------------------------------------------
+  var mouseTarget = { x: 1000, y: 1000 };
+  var mouseCurrent = { x: 1000, y: 1000 };
+  var mouseActiveTarget = 0.0;
+  var mouseActiveCurrent = 0.0;
+
+  function clientToNDC(clientX, clientY) {
+    var rect = canvas.getBoundingClientRect();
+    var x = -1.0 + 2.0 * ((clientX - rect.left) / rect.width);
+    var y = 1.0 - 2.0 * ((clientY - rect.top) / rect.height);
+    return { x: x, y: y };
+  }
+
+  canvas.addEventListener("pointermove", function (e) {
+    var p = clientToNDC(e.clientX, e.clientY);
+    mouseTarget.x = p.x;
+    mouseTarget.y = p.y;
+    mouseActiveTarget = 1.0;
+  });
+  canvas.addEventListener("pointerdown", function (e) {
+    var p = clientToNDC(e.clientX, e.clientY);
+    mouseTarget.x = p.x;
+    mouseTarget.y = p.y;
+    mouseActiveTarget = 1.0;
+  });
+  canvas.addEventListener("pointerleave", function () {
+    mouseActiveTarget = 0.0;
+  });
+  canvas.addEventListener("pointerup", function () {
+    mouseActiveTarget = 0.0;
+  });
+
+  // ---------------------------------------------------------------------
+  // Resize handling
+  // ---------------------------------------------------------------------
+  var pointSize = 3.0;
+
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var cssSize = canvas.getBoundingClientRect().width || Math.min(window.innerWidth, window.innerHeight) * 0.9;
+    var px = Math.max(1, Math.round(cssSize * dpr));
+    if (canvas.width !== px || canvas.height !== px) {
+      canvas.width = px;
+      canvas.height = px;
+    }
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    pointSize = Math.max(1.6, (canvas.width / (GRID - 1)) * 1.35);
+  }
+  window.addEventListener("resize", resize);
+
+  // ---------------------------------------------------------------------
+  // Main loop
+  // ---------------------------------------------------------------------
+  function startLoop() {
+    resize();
+    gl.disable(gl.DEPTH_TEST);
+    gl.clearColor(0.027, 0.031, 0.051, 1.0);
+
+    var startTime = performance.now();
+    var lastTime = startTime;
+
+    function frame(now) {
+      var t = (now - startTime) / 1000.0;
+      var dt = Math.min((now - lastTime) / 1000.0, 1 / 30);
+      lastTime = now;
+
+      // smooth mouse interpolation
+      // position tracks the pointer almost instantly (just enough smoothing
+      // to avoid single-frame teleports); the active/fade flag eases a bit
+      // more so entering/leaving the canvas doesn't pop.
+      var posSmoothing = 1.0 - Math.pow(0.00001, dt);
+      var activeSmoothing = 1.0 - Math.pow(0.01, dt);
+      mouseCurrent.x += (mouseTarget.x - mouseCurrent.x) * posSmoothing;
+      mouseCurrent.y += (mouseTarget.y - mouseCurrent.y) * posSmoothing;
+      mouseActiveCurrent += (mouseActiveTarget - mouseActiveCurrent) * activeSmoothing;
+
+      // ---- simulation pass: GRID x GRID viewport into writeFBO ----
+      gl.bindFramebuffer(gl.FRAMEBUFFER, writeFBO);
+      gl.viewport(0, 0, GRID, GRID);
+      gl.useProgram(simProgram);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, readTex);
+      gl.uniform1i(simUniforms.uPosTex, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, homeTex);
+      gl.uniform1i(simUniforms.uHomeTex, 1);
+      gl.uniform1f(simUniforms.uTime, t);
+      gl.uniform1f(simUniforms.uDt, dt);
+      gl.uniform2f(simUniforms.uMouse, mouseCurrent.x, mouseCurrent.y);
+      gl.uniform1f(simUniforms.uMouseActive, mouseActiveCurrent);
+      gl.uniform1f(simUniforms.uMouseRadius, 0.42);
+      gl.uniform1f(simUniforms.uMouseStrength, 52.0);
+      gl.disable(gl.BLEND);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+      swapPingPong();
+
+      // ---- render pass: draw particles to the canvas ----
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(renderProgram);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, readTex);
+      gl.uniform1i(renderUniforms.uPosTex, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, colorTex);
+      gl.uniform1i(renderUniforms.uColorTex, 1);
+      gl.uniform1i(renderUniforms.uGrid, GRID);
+      gl.uniform1f(renderUniforms.uPointSize, pointSize);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.drawArrays(gl.POINTS, 0, PARTICLE_COUNT);
+
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+<script id="adina-context-guard">
+// Browsers cap the number of live WebGL contexts (~16) and drop the oldest when more tabs open one.
+// If that happens to this page, reload it the next time the tab is shown.
+(() => {
+  let lost = false;
+  document.addEventListener('webglcontextlost', (e) => { e.preventDefault(); lost = true; }, true);
+  const reloadIfLost = () => { if (lost && document.visibilityState === 'visible') location.reload(); };
+  document.addEventListener('visibilitychange', reloadIfLost);
+  window.addEventListener('focus', reloadIfLost);
+})();
+</script>
+</body>
+</html>
