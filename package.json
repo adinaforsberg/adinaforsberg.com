@@ -1,0 +1,15 @@
+{
+  "name": "adinaforsberg.com",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "preview": "node scripts/serve.mjs --open",
+    "screenshot": "node scripts/screenshot.mjs",
+    "add-image": "node scripts/add-image.mjs",
+    "setup": "npm install && npx playwright install chromium"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.0",
+    "sharp": "^0.35.5"
+  }
+}

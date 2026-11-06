@@ -36,6 +36,17 @@ Avoid replacing large mp3s often: old versions stay in the git history forever a
 ## Preview locally
 
 ```sh
-npx serve public
+npm run setup      # once: installs Playwright (screenshots) and sharp (image conversion)
+npm run preview    # serves public/ like GitHub Pages at http://localhost:4000 and opens the browser
 ```
-then open http://localhost:3000.
+
+Other helpers:
+- `npm run screenshot -- [--label before] [pages…]`: phone + desktop PNGs in `.screenshots/`
+- `npm run add-image -- <photo> [name]`: resize and convert to WebP in `public/images/`
+
+## Working with Claude
+
+`CLAUDE.md` tells Claude Code how to work on the site with Adina: one local `idea/…` branch per idea, check every
+change with screenshots, explain things in plain language. Project skills in `.claude/skills/`:
+`preview` (local server), `publish` (merge to `main` after she confirms),
+`undo` (reverts, never rewrites history).
